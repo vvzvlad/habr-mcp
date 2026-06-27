@@ -2,8 +2,9 @@
 
 Everything Habr-route-specific (URLs, query params, request bodies, auth headers)
 is centralized here so the routes are easy to adjust if Habr changes them. Read
-methods are anonymous; write methods require a logged-in session supplied via
-settings (connect.sid cookie + CSRF token).
+methods are anonymous; write methods require a logged-in session, supplied
+per-user by the registry from credentials stored via the ``habr_login`` tool
+(full browser Cookie header + CSRF token).
 """
 
 from __future__ import annotations
@@ -28,17 +29,17 @@ from src.settings import Settings
 # Base for every endpoint; trailing slash matters for httpx relative URL joins.
 BASE_URL = "https://habr.com/kek/v2/"
 
-# Message shown when a write tool is called without credentials configured.
+# Message shown when a write tool is called without stored credentials.
 MISSING_CREDS_MESSAGE = (
-    "Для записи нужны HABR_CONNECT_SID и HABR_CSRF_TOKEN "
-    "(получите их из cookie залогиненного браузера)."
+    "Нет сохранённой сессии Habr. Вызовите habr_login и передайте полный "
+    "Cookie-заголовок залогиненного браузера."
 )
 
 # Message shown when an author tool (drafts) is called without author credentials.
 AUTHOR_MISSING_CREDS_MESSAGE = (
-    "Для авторских действий (черновики) нужны HABR_COOKIE и HABR_CSRF_TOKEN: "
-    "полный Cookie-заголовок залогиненного браузера (connect_sid + hsec_id + "
-    "habrsession_id + …) и csrf-токен из заголовка csrf-token."
+    "Нет сохранённой авторской сессии Habr. Вызовите habr_login с полным "
+    "Cookie-заголовком залогиненного браузера (connect_sid + hsec_id + "
+    "habrsession_id + …); csrf-токен подтянется автоматически."
 )
 
 # Statuses a draft form may carry for update_draft to be safe. A falsy status
@@ -51,6 +52,20 @@ _NANOID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567
 
 # Matches a habrastorage URL anywhere in the upload response body (fallback).
 _HABRASTORAGE_RE = re.compile(r"https://habrastorage\.org/\S+")
+
+# The csrf token Habr embeds in the feed page lives in a meta tag. Tolerate
+# single or double quotes and intermediate attributes (e.g. an `id=…` between
+# name and content), matching both attribute orders (name-then-content and
+# content-then-name).
+_CSRF_META_RE = re.compile(
+    r'<meta[^>]*\bname=["\']csrf-token["\'][^>]*\bcontent=["\']([^"\']+)["\']'
+)
+_CSRF_META_RE_REV = re.compile(
+    r'<meta[^>]*\bcontent=["\']([^"\']+)["\'][^>]*\bname=["\']csrf-token["\']'
+)
+
+# Page that reliably carries the csrf-token meta tag for a logged-in session.
+_CSRF_PROBE_URL = "https://habr.com/ru/feed/"
 
 # Habr rejects an announce (postForm.preview) shorter than this many rendered
 # characters with HTTP 422 ("Аннотация не может быть короче 100 символов …").
@@ -86,6 +101,28 @@ def _wrap_html(text: str) -> str:
     return "<p>" + html_module.escape(text, quote=False) + "</p>"
 
 
+async def fetch_csrf_token(cookie: str, settings: Settings) -> str | None:
+    """Scrape the csrf-token from the Habr feed page for a logged-in Cookie.
+
+    GETs ``https://habr.com/ru/feed/`` with the given Cookie header (browser-like
+    UA, configured proxy/timeout) and reads the ``<meta name="csrf-token">`` tag.
+    Returns the token, or None when it cannot be found or a network error occurs.
+    """
+    headers = {"User-Agent": settings.user_agent, "Cookie": cookie}
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.request_timeout,
+            proxy=settings.proxy or None,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(_CSRF_PROBE_URL, headers=headers)
+    except httpx.HTTPError:
+        return None
+    body = response.text or ""
+    match = _CSRF_META_RE.search(body) or _CSRF_META_RE_REV.search(body)
+    return match.group(1) if match else None
+
+
 class HabrClient:
     """Thin async wrapper over the Habr ``kek/v2`` API."""
 
@@ -115,9 +152,18 @@ class HabrClient:
         return data
 
     def _auth_headers(self) -> dict[str, str]:
-        """Build Cookie + csrf-token headers; raise if creds are missing."""
-        sid = self._settings.habr_connect_sid
+        """Build Cookie + csrf-token headers for comment/vote/bookmark writes.
+
+        In the multi-tenant model the user supplies the FULL Cookie header
+        (``habr_cookie``), so that is preferred. The legacy single-``connect.sid``
+        construction is kept as a fallback for callers that only set
+        ``habr_connect_sid``. Raises if neither cookie source is available.
+        """
         token = self._settings.habr_csrf_token
+        cookie = self._settings.habr_cookie
+        if cookie and token:
+            return {"Cookie": cookie, "csrf-token": token}
+        sid = self._settings.habr_connect_sid
         if not sid or not token:
             raise HabrApiError(MISSING_CREDS_MESSAGE)
         cookie_name = self._settings.habr_csrf_cookie_name

@@ -11,6 +11,7 @@ from src.client import (
     MISSING_CREDS_MESSAGE,
     HabrApiError,
     HabrClient,
+    fetch_csrf_token,
 )
 
 BASE_URL = "https://habr.com/kek/v2/"
@@ -619,3 +620,64 @@ async def test_update_draft_short_announce_raises_no_save(
         await client.aclose()
     assert "100 символов" in str(exc.value)
     assert not save_route.called
+
+
+# -- fetch_csrf_token --------------------------------------------------------
+
+_CSRF_PROBE_URL = "https://habr.com/ru/feed/"
+
+
+@respx.mock
+async def test_fetch_csrf_token_simple_meta(anon_settings):
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(
+            200, text='<meta name="csrf-token" content="TOK_SIMPLE">'
+        )
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) == "TOK_SIMPLE"
+
+
+@respx.mock
+async def test_fetch_csrf_token_intermediate_attribute(anon_settings):
+    # An intermediate attribute (id=...) between name and content must still match.
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            text='<meta name="csrf-token" id="x" content="TOK_MID">',
+        )
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) == "TOK_MID"
+
+
+@respx.mock
+async def test_fetch_csrf_token_single_quotes(anon_settings):
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(
+            200, text="<meta name='csrf-token' content='TOK_SQ'>"
+        )
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) == "TOK_SQ"
+
+
+@respx.mock
+async def test_fetch_csrf_token_content_before_name(anon_settings):
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(
+            200, text='<meta content="TOK_REV" name="csrf-token">'
+        )
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) == "TOK_REV"
+
+
+@respx.mock
+async def test_fetch_csrf_token_missing_returns_none(anon_settings):
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(200, text="<html>no token here</html>")
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) is None
+
+
+@respx.mock
+async def test_fetch_csrf_token_network_error_returns_none(anon_settings):
+    respx.get(_CSRF_PROBE_URL).mock(side_effect=httpx.ConnectError("boom"))
+    assert await fetch_csrf_token("cookie=1", anon_settings) is None
