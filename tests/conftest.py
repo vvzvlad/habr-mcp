@@ -157,6 +157,42 @@ def article_payload() -> dict:
 
 
 @pytest.fixture
+def drafts_payload() -> dict:
+    """A drafts list payload (articles/drafts shape) with two article drafts."""
+    return {
+        "pagesCount": 1,
+        "publicationIds": ["1052760", "1052742"],
+        "publicationRefs": {
+            "1052760": {
+                "id": "1052760",
+                "titleHtml": "Разработка WB-MGE v.3",
+                "status": "draft",
+                "timePublished": None,
+                "author": {"alias": "sangman1987", "fullname": "Игорь"},
+                "statistics": {"score": 0, "commentsCount": 0},
+                "readingTime": 10,
+                "hubs": [{"titleHtml": "Умный дом", "alias": "home_automation"}],
+                "flowNew": {"id": "14", "alias": "industrial_engineering",
+                            "title": "Промышленная инженерия"},
+                "tags": [],
+            },
+            "1052742": {
+                "id": "1052742",
+                "titleHtml": "Отказы термопар",
+                "status": "draft",
+                "timePublished": None,
+                "author": {"alias": "sangman1987", "fullname": "Игорь"},
+                "statistics": {"score": 0, "commentsCount": 0},
+                "readingTime": 13,
+                "hubs": [{"titleHtml": "DIY или Сделай сам", "alias": "DIY"}],
+                "flowNew": {"id": "2", "alias": "backend", "title": "Бэкенд"},
+                "tags": [{"titleHtml": "термопары"}],
+            },
+        },
+    }
+
+
+@pytest.fixture
 def comments_payload() -> dict:
     """A 2-level comment tree: one root with one child."""
     return {

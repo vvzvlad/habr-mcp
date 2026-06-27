@@ -78,6 +78,14 @@ def seeded_server(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def seeded_social_server(tmp_path, monkeypatch):
+    """Seeded READY server with the social-tools feature toggle enabled."""
+    CredStore(str(tmp_path)).set(SEED_TOKEN, SEED_COOKIE, "CSRF456", "uuid-1")
+    monkeypatch.setattr(server_mod, "token_from_ctx", lambda ctx: SEED_TOKEN)
+    return build_server(Settings(state_dir=str(tmp_path), enable_social_tools=True))
+
+
+@pytest.fixture
 def anon_server(tmp_path):
     """A built server with an empty store and no token (every call is ANON)."""
     return build_server(Settings(state_dir=str(tmp_path)))
@@ -161,17 +169,12 @@ async def test_tools_are_registered(anon_server):
     tools = await anon_server.list_tools()
     names = {t.name for t in tools}
     assert names == {
-        "search_articles",
-        "list_articles",
         "get_article",
-        "get_comments",
-        "post_comment",
-        "vote_article",
-        "vote_comment",
-        "create_draft",
+        "create_draft_from_docmost",
         "create_draft_from_gdoc",
         "get_draft",
-        "update_draft",
+        "list_drafts",
+        "update_draft_from_docmost",
         "update_draft_from_gdoc",
         "delete_draft",
         "resolve_hubs",
@@ -194,7 +197,7 @@ async def test_ctx_not_exposed_in_tool_schema(anon_server):
 
 
 async def test_anon_tool_returns_paste_key_guidance(anon_server):
-    out = _text(await anon_server.call_tool("list_articles", {"feed": "top"}))
+    out = _text(await anon_server.call_tool("get_article", {"article_id": 1}))
     assert "Authorization: Bearer hmcp_" in out
     assert "habr_login" in out
 
@@ -213,7 +216,7 @@ async def test_needs_login_tool_message(tmp_path, monkeypatch):
     # Valid token but empty store -> NEEDS_LOGIN guard message.
     monkeypatch.setattr(server_mod, "token_from_ctx", lambda ctx: "hmcp_nostore")
     server = build_server(Settings(state_dir=str(tmp_path)))
-    out = _text(await server.call_tool("vote_article", {"article_id": 1, "direction": "up"}))
+    out = _text(await server.call_tool("get_draft", {"post_id": 1}))
     assert "habr_login" in out
     assert "DevTools" in out
 
@@ -281,12 +284,14 @@ async def test_auth_status_ready_hides_token(seeded_server):
 
 
 @respx.mock
-async def test_list_articles_tool_returns_formatted(seeded_server, feed_payload):
+async def test_list_articles_tool_returns_formatted(seeded_social_server, feed_payload):
     respx.get(f"{BASE_URL}articles/").mock(
         return_value=httpx.Response(200, json=feed_payload)
     )
     out = _text(
-        await seeded_server.call_tool("list_articles", {"feed": "top", "period": "daily"})
+        await seeded_social_server.call_tool(
+            "list_articles", {"feed": "top", "period": "daily"}
+        )
     )
     assert "Вторая статья" in out
     assert "Первая" in out
@@ -303,15 +308,15 @@ async def test_get_article_tool(seeded_server, article_payload):
     assert "## Раздел" in out
 
 
-async def test_list_articles_tool_rejects_bad_feed(seeded_server):
-    out = _text(await seeded_server.call_tool("list_articles", {"feed": "bogus"}))
+async def test_list_articles_tool_rejects_bad_feed(seeded_social_server):
+    out = _text(await seeded_social_server.call_tool("list_articles", {"feed": "bogus"}))
     assert "Недопустимый feed" in out
     assert "top" in out
 
 
-async def test_vote_article_tool_rejects_bad_direction(seeded_server):
+async def test_vote_article_tool_rejects_bad_direction(seeded_social_server):
     out = _text(
-        await seeded_server.call_tool(
+        await seeded_social_server.call_tool(
             "vote_article", {"article_id": 100, "direction": "sideways"}
         )
     )
@@ -319,21 +324,21 @@ async def test_vote_article_tool_rejects_bad_direction(seeded_server):
 
 
 @respx.mock
-async def test_vote_article_tool_with_creds(seeded_server):
+async def test_vote_article_tool_with_creds(seeded_social_server):
     respx.post(f"{BASE_URL}articles/100/votes/up/").mock(
         return_value=httpx.Response(200, json={"ok": True})
     )
     out = _text(
-        await seeded_server.call_tool(
+        await seeded_social_server.call_tool(
             "vote_article", {"article_id": 100, "direction": "up"}
         )
     )
     assert "Голос за статью учтён" in out
 
 
-async def test_vote_comment_tool_rejects_bad_direction(seeded_server):
+async def test_vote_comment_tool_rejects_bad_direction(seeded_social_server):
     out = _text(
-        await seeded_server.call_tool(
+        await seeded_social_server.call_tool(
             "vote_comment",
             {"article_id": 100, "comment_id": 5, "direction": "sideways"},
         )
@@ -342,12 +347,12 @@ async def test_vote_comment_tool_rejects_bad_direction(seeded_server):
 
 
 @respx.mock
-async def test_vote_comment_tool_with_creds(seeded_server):
+async def test_vote_comment_tool_with_creds(seeded_social_server):
     route = respx.post(f"{BASE_URL}articles/100/comments/5/votes").mock(
         return_value=httpx.Response(200, json={"vote": {"value": 1}, "score": 0})
     )
     out = _text(
-        await seeded_server.call_tool(
+        await seeded_social_server.call_tool(
             "vote_comment",
             {"article_id": 100, "comment_id": 5, "direction": "up"},
         )
@@ -410,7 +415,7 @@ async def test_create_draft_tool_reports_id(seeded_server, docmost_doc):
     )
     out = _text(
         await seeded_server.call_tool(
-            "create_draft",
+            "create_draft_from_docmost",
             {
                 "title": "T",
                 "doc": json_module.dumps(docmost_doc),
@@ -506,7 +511,9 @@ def test_draft_id_reads_post_key():
 
 async def test_create_draft_tool_rejects_bad_json(seeded_server):
     out = _text(
-        await seeded_server.call_tool("create_draft", {"title": "T", "doc": "{not json"})
+        await seeded_server.call_tool(
+            "create_draft_from_docmost", {"title": "T", "doc": "{not json"}
+        )
     )
     assert "Не удалось разобрать doc" in out
 
@@ -529,13 +536,40 @@ async def test_lifespan_closes_clients(seeded_server, monkeypatch):
 
     # Materialize a per-user client via a tool call so there is something to close.
     with respx.mock:
-        respx.get(f"{BASE_URL}articles/100/comments/").mock(
-            return_value=httpx.Response(200, json={"comments": {}, "threads": []})
+        respx.get(f"{BASE_URL}articles/100/").mock(
+            return_value=httpx.Response(
+                200, json={"id": "100", "titleHtml": "x", "textHtml": "<p>x</p>"}
+            )
         )
-        await seeded_server.call_tool("get_comments", {"article_id": 100})
+        await seeded_server.call_tool("get_article", {"article_id": 100})
 
     lifespan = seeded_server.settings.lifespan
     assert lifespan is not None
     async with lifespan(seeded_server):
         assert closed["count"] == 0  # not closed while running
     assert closed["count"] >= 1  # the per-user client was closed on teardown
+
+
+# -- social-tools feature toggle / list_drafts -------------------------------
+
+
+async def test_social_tools_enabled_when_toggle_on(seeded_social_server):
+    names = {t.name for t in await seeded_social_server.list_tools()}
+    assert {
+        "search_articles", "list_articles", "get_comments",
+        "post_comment", "vote_article", "vote_comment",
+    } <= names
+
+
+@respx.mock
+async def test_list_drafts_tool(seeded_server, drafts_payload):
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(200, json={"id": "5818348", "alias": "sangman1987"})
+    )
+    respx.get(f"{BASE_URL}articles/drafts").mock(
+        return_value=httpx.Response(200, json=drafts_payload)
+    )
+    out = _text(await seeded_server.call_tool("list_drafts", {}))
+    assert "id=1052760" in out
+    assert "Разработка WB-MGE" in out
+    assert "поток industrial_engineering" in out

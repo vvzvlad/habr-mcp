@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     user_agent: str = DEFAULT_USER_AGENT
     # Page size for feeds / search.
     per_page: int = 20
+    # Feature toggle: expose the "social" Habr tools (feed/search browsing and
+    # comment/vote interaction). Disabled by default; enable with
+    # HABR_MCP_ENABLE_SOCIAL_TOOLS=true. Gates exactly six tools:
+    # search_articles, list_articles, get_comments, post_comment,
+    # vote_article, vote_comment.
+    enable_social_tools: bool = Field(
+        default=False, validation_alias="HABR_MCP_ENABLE_SOCIAL_TOOLS"
+    )
 
     # ``populate_by_name`` lets callers/tests pass ``host``/``port``/``state_dir``
     # by field name even though those read from ``HABR_MCP_*`` env via aliases.

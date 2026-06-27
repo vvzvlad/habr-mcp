@@ -391,6 +391,52 @@ async def test_get_draft_hits_post_data(author_settings, post_data_payload):
 
 
 @respx.mock
+async def test_list_drafts_resolves_alias_and_hits_drafts(author_settings, drafts_payload):
+    # me resolves the author alias; the drafts list then goes to articles/drafts
+    # (NO trailing slash) with user/draftType/page/perPage in the query.
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(200, json={"id": "5818348", "alias": "sangman1987"})
+    )
+    route = respx.get(f"{BASE_URL}articles/drafts").mock(
+        return_value=httpx.Response(200, json=drafts_payload)
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.list_drafts(page=1)
+    finally:
+        await client.aclose()
+
+    assert result == drafts_payload
+    request = route.calls.last.request
+    # No trailing slash: articles/drafts/ is a different route that 404s.
+    assert request.url.path == "/kek/v2/articles/drafts"
+    params = request.url.params
+    assert params["user"] == "sangman1987"
+    assert params["draftType"] == "posts"
+    assert params["page"] == "1"
+    assert params["perPage"] == "20"
+
+
+@respx.mock
+async def test_list_drafts_raises_without_alias(author_settings):
+    # When `me` carries no alias, list_drafts must fail before hitting drafts.
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(200, json={"id": "5818348"})
+    )
+    drafts_route = respx.get(f"{BASE_URL}articles/drafts").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.list_drafts()
+    finally:
+        await client.aclose()
+    assert "логин" in str(exc.value)
+    assert not drafts_route.called
+
+
+@respx.mock
 async def test_update_draft_coerces_types(author_settings, post_data_payload):
     import json as json_module
 

@@ -101,6 +101,56 @@ def format_article_list(payload: dict[str, Any], header: str) -> str:
     return "\n".join(lines)
 
 
+def format_drafts_list(payload: dict[str, Any], header: str) -> str:
+    """Render an ``articles/drafts`` payload as a numbered, draft-focused list.
+
+    Same ``publicationIds`` / ``publicationRefs`` shape as a feed, but shows the
+    post id (for get_draft / update_draft_from_docmost / delete_draft), title,
+    flow, hubs and tags instead of feed score/date (a draft has neither).
+    """
+    ids = payload.get("publicationIds") or []
+    refs = payload.get("publicationRefs") or {}
+    pages_count = payload.get("pagesCount")
+
+    lines: list[str] = [header]
+    if pages_count is not None:
+        lines.append(f"Всего страниц: {pages_count}")
+    if not ids:
+        lines.append("Черновиков нет.")
+        return "\n".join(lines)
+
+    lines.append("")
+    for index, draft_id in enumerate(ids, start=1):
+        ref = refs.get(str(draft_id)) or refs.get(draft_id) or {}
+        title = html_to_text(ref.get("titleHtml") or "") or "(без заголовка)"
+        reading = ref.get("readingTime")
+        reading_str = f"{reading} мин" if reading is not None else "?"
+        flow = ref.get("flowNew")
+        if isinstance(flow, dict):
+            flow_str = flow.get("alias") or flow.get("id") or "—"
+        else:
+            flow_str = "—"
+        hubs = ref.get("hubs") or []
+        hub_titles = ", ".join(
+            html_to_text(h.get("titleHtml") or h.get("title") or "")
+            for h in hubs[:3]
+            if isinstance(h, dict)
+        )
+        tags = ref.get("tags") or []
+        tag_titles = ", ".join(
+            html_to_text(t.get("titleHtml") or "") if isinstance(t, dict) else str(t)
+            for t in tags[:5]
+        )
+        lines.append(
+            f"{index}. {title}\n   id={draft_id} · поток {flow_str} · чтение {reading_str}"
+        )
+        if hub_titles:
+            lines.append(f"   хабы: {hub_titles}")
+        if tag_titles:
+            lines.append(f"   теги: {tag_titles}")
+    return "\n".join(lines)
+
+
 def format_article(data: dict[str, Any]) -> str:
     """Render a full article: metadata block, separator, Markdown body."""
     article_id = data.get("id", "?")

@@ -60,6 +60,7 @@ Server-level (shared, non-secret) variables:
 | `PROXY` | HTTP/SOCKS proxy URL for httpx | empty |
 | `REQUEST_TIMEOUT` | httpx request timeout, seconds | `20` |
 | `PER_PAGE` | Page size for feeds / search | `20` |
+| `HABR_MCP_ENABLE_SOCIAL_TOOLS` | Expose the social tools (search/feed/comment/vote); off by default | `false` |
 | `DOCMOST_BASE_URL` | Base URL to download Docmost images for reupload | empty |
 | `DOCMOST_API_TOKEN` | Bearer token to download Docmost attachments | empty |
 
@@ -84,6 +85,11 @@ Read (anonymous):
 | `get_article` | `article_id: int` | Full article text (Markdown) |
 | `get_comments` | `article_id: int`, `limit: int = 100` | Comment tree |
 
+> The `search_articles`, `list_articles` and `get_comments` tools are **social
+> tools** and are **disabled by default**. Enable them (together with the write
+> tools below) with `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`. `get_article` is always
+> available.
+
 Write (requires a session):
 
 | Tool | Parameters | What it does |
@@ -91,16 +97,19 @@ Write (requires a session):
 | `post_comment` | `article_id: int`, `text: str`, `parent_id: int \| None` | Comment (0/None = top level) |
 | `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Vote on an article |
 | `vote_comment` | `comment_id: int`, `direction: str` | Vote on a comment (EXPERIMENTAL) |
-| `bookmark_article` | `article_id: int`, `add: bool = True` | Bookmark (removal EXPERIMENTAL) |
+
+> `post_comment`, `vote_article` and `vote_comment` are **social tools**,
+> **disabled by default** — enable them with `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`.
 
 Author layer — drafts (requires an author session):
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `create_draft` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`) |
+| `create_draft_from_docmost` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`) |
 | `create_draft_from_gdoc` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Google Docs document (`doc` = JSON from `readDocument(format='json')`) |
 | `get_draft` | `post_id: int` | Read a draft (summary + raw ProseMirror sources) |
-| `update_draft` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields (read-modify-write autosave) |
+| `list_drafts` | `page: int = 1` | List the logged-in author's drafts (id, title, flow, hubs, tags) |
+| `update_draft_from_docmost` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields (read-modify-write autosave) |
 | `update_draft_from_gdoc` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields from a Google Docs document (`doc` = JSON from `readDocument(format='json')`) |
 | `delete_draft` | `post_id: int` | Delete a draft |
 | `resolve_hubs` | `aliases: list[str]`, `post_id: int \| None` | Hub aliases → numeric ids |

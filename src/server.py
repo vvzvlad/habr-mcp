@@ -31,6 +31,7 @@ from src.formatting import (
     format_article_list,
     format_comments,
     format_draft,
+    format_drafts_list,
     html_to_text,
 )
 from src.registry import ClientRegistry
@@ -206,6 +207,22 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         lifespan=_lifespan,
     )
 
+    def social_tool(**kwargs):
+        """Register a "social" tool only when the feature toggle is on.
+
+        Returns FastMCP's real ``mcp.tool`` decorator when
+        ``enable_social_tools`` is enabled; otherwise an identity decorator that
+        defines the function but never registers it with MCP, so the tool is
+        absent from the advertised tool list. Gates feed/search/comment/vote.
+        """
+        if base_settings.enable_social_tools:
+            return mcp.tool(**kwargs)
+
+        def _identity(func):
+            return func
+
+        return _identity
+
     async def _ready_client(ctx: Context) -> tuple[HabrClient | None, str | None]:
         """Resolve the caller; return (client, None) when READY else (None, guard).
 
@@ -221,7 +238,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     # -- read tools ---------------------------------------------------------
 
-    @mcp.tool(
+    @social_tool(
         name="search_articles",
         description=(
             "Поиск статей на Habr по тексту запроса (сортировка по релевантности). "
@@ -240,7 +257,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return str(exc)
         return format_article_list(payload, f'Результаты поиска: "{query}" (стр. {page})')
 
-    @mcp.tool(
+    @social_tool(
         name="list_articles",
         description=(
             "Лента статей Habr. Аргумент feed: 'top' (по рейтингу), 'new' "
@@ -290,7 +307,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return str(exc)
         return format_article(data)
 
-    @mcp.tool(
+    @social_tool(
         name="get_comments",
         description=(
             "Комментарии к статье Habr в виде дерева с отступами по уровню "
@@ -311,7 +328,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     # -- write tools (require login) ---------------------------------------
 
-    @mcp.tool(
+    @social_tool(
         name="post_comment",
         description=(
             "Опубликовать комментарий к статье Habr (требует сохранённого логина — "
@@ -333,7 +350,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return str(exc)
         return f"Комментарий отправлен. Ответ Habr: {result}"
 
-    @mcp.tool(
+    @social_tool(
         name="vote_article",
         description=(
             "Проголосовать за статью Habr (требует сохранённого логина — вызови "
@@ -353,7 +370,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return str(exc)
         return f"Голос за статью учтён. Ответ Habr: {result}"
 
-    @mcp.tool(
+    @social_tool(
         name="vote_comment",
         description=(
             "Проголосовать за комментарий Habr (требует сохранённого логина — "
@@ -379,7 +396,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # -- author tools: drafts (require a logged-in author session) ----------
 
     @mcp.tool(
-        name="create_draft",
+        name="create_draft_from_docmost",
         description=(
             "Создать черновик статьи на Habr из страницы Docmost (требует "
             "сохранённого авторского логина — вызови habr_login). Аргумент title — "
@@ -393,7 +410,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Возвращает id созданного черновика и предупреждения конвертации."
         ),
     )
-    async def create_draft(
+    async def create_draft_from_docmost(
         title: str,
         doc: str,
         ctx: Context,
@@ -497,7 +514,28 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return str(exc)
 
     @mcp.tool(
-        name="update_draft",
+        name="list_drafts",
+        description=(
+            "Список черновиков текущего автора на Habr (требует авторского "
+            "логина — вызови habr_login). Логин определяется автоматически по "
+            "сессии. Аргумент page — номер страницы (по умолчанию 1). Возвращает "
+            "нумерованный список черновиков с id (его передавай в get_draft / "
+            "update_draft_from_docmost / delete_draft), заголовком, потоком, "
+            "хабами и тегами."
+        ),
+    )
+    async def list_drafts(ctx: Context, page: int = 1) -> str:
+        client, msg = await _ready_client(ctx)
+        if msg:
+            return msg
+        try:
+            payload = await client.list_drafts(page)
+        except HabrApiError as exc:
+            return str(exc)
+        return format_drafts_list(payload, f"Черновики (стр. {page})")
+
+    @mcp.tool(
+        name="update_draft_from_docmost",
         description=(
             "Обновить существующий черновик Habr (read-modify-write автосейв; "
             "требует авторского логина — вызови habr_login). Аргумент post_id — id "
@@ -509,7 +547,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "результат и предупреждения конвертации."
         ),
     )
-    async def update_draft(
+    async def update_draft_from_docmost(
         post_id: int,
         ctx: Context,
         title: str | None = None,
@@ -660,7 +698,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Ищет хабы Habr по подстроке в названии/алиасе (пустой query — весь "
             "список, до limit), требует авторского логина (habr_login), возвращает "
             "строки 'id  alias  title'; id используется в аргументе hubs у "
-            "create_draft."
+            "create_draft_from_docmost / create_draft_from_gdoc."
         ),
     )
     async def search_hubs(ctx: Context, query: str = "", limit: int = 40) -> str:
@@ -705,7 +743,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Список потоков (flows) Habr с их id и алиасами (требует авторского "
             "логина — вызови habr_login). Аргумент publication_id — необязательный "
             "id публикации (контекст). Используйте id потока в аргументе flow "
-            "инструментов create_draft / update_draft."
+            "инструментов create_draft_from_docmost / update_draft_from_docmost "
+            "(и их *_from_gdoc-вариантов)."
         ),
     )
     async def list_flows(ctx: Context, publication_id: int | None = None) -> str:

@@ -507,6 +507,42 @@ class HabrClient:
             ),
         )
 
+    async def get_me(self) -> dict[str, Any]:
+        """Fetch the current logged-in user object via ``me`` (author session).
+
+        Used to resolve the author's own alias for endpoints that require a
+        ``user`` query param (e.g. the drafts list). Returns the parsed dict.
+        """
+        return await self._get("me", extra_headers=self._author_headers())
+
+    async def list_drafts(
+        self, page: int = 1, draft_type: str = "posts"
+    ) -> dict[str, Any]:
+        """List the logged-in author's drafts (confirmed live).
+
+        Habr's drafts list lives at ``GET articles/drafts`` (NO trailing slash —
+        ``articles/drafts/`` is a different route that 404s) and REQUIRES the
+        author's own ``user`` alias plus a ``draftType`` (``posts`` carries the
+        article drafts this server creates). The alias is resolved via ``me``.
+        Returns the standard feed payload
+        (``publicationIds`` / ``publicationRefs`` / ``pagesCount``).
+        """
+        me = await self.get_me()
+        alias = me.get("alias") if isinstance(me, dict) else None
+        if not alias:
+            raise HabrApiError(
+                "Не удалось определить логин текущего пользователя Habr (me.alias)."
+            )
+        params: dict[str, Any] = {
+            "user": alias,
+            "draftType": draft_type,
+            "page": page,
+            "perPage": self._settings.per_page,
+        }
+        return await self._get(
+            "articles/drafts", params, extra_headers=self._author_headers()
+        )
+
     async def update_draft(
         self,
         post_id: int,

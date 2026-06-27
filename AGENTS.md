@@ -36,8 +36,9 @@ anonymously; write and author tools require a logged-in session and report a
 clear guard message when the caller is not ready.
 
 ## Author layer (drafts)
-`create_draft` / `create_draft_from_gdoc` / `get_draft` / `update_draft` /
-`update_draft_from_gdoc` / `delete_draft` / `resolve_hubs` / `list_flows` publish
+`create_draft_from_docmost` / `create_draft_from_gdoc` / `get_draft` /
+`list_drafts` / `update_draft_from_docmost` / `update_draft_from_gdoc` /
+`delete_draft` / `resolve_hubs` / `list_flows` publish
 Docmost pages **and Google Docs documents** into Habr **drafts** (`publication/…`,
 protocol in `docs/habr-publication-protocol.md`). Promoting a draft to public
 status ("Publish") is **NOT implemented** — protocol gap §8. Docmost article
@@ -75,6 +76,10 @@ make run               # runs .venv/bin/python main.py
   `habr_login` and are stored encrypted under `data/`.
 - Code comments are in English; MCP tool descriptions (`description=`) are in
   Russian (text for the LLM).
+- The six "social" tools (`search_articles`, `list_articles`, `get_comments`,
+  `post_comment`, `vote_article`, `vote_comment`) are hidden behind the
+  `HABR_MCP_ENABLE_SOCIAL_TOOLS` feature toggle (default **off**); `get_article`
+  and the author/draft tools are always exposed.
 - All repeated actions (env setup, tests, run) go through `make` targets.
 - Python always runs inside a local `.venv`, created automatically by `make` on
   first use — never the system Python.
