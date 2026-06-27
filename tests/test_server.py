@@ -175,6 +175,7 @@ async def test_tools_are_registered(anon_server):
         "update_draft_from_gdoc",
         "delete_draft",
         "resolve_hubs",
+        "search_hubs",
         "list_flows",
         "habr_login",
         "auth_status",
@@ -374,6 +375,30 @@ async def test_resolve_hubs_tool_maps_aliases(seeded_server):
     assert "habr → 161 (Habr)" in out
     assert "smol → 23108 ($mol *)" in out
     assert "ghost → не найден" in out
+
+
+@respx.mock
+async def test_search_hubs_tool_filters_by_query(seeded_server):
+    catalog = {
+        "collective": [
+            {"id": 359, "alias": "programming", "title": "Программирование"}
+        ],
+        "offtopic": [{"id": 21976, "alias": "diy", "title": "DIY или Сделай сам"}],
+        "corporative": [],
+        "byPost": [],
+    }
+    respx.get(f"{BASE_URL}publication/suggest-hubs").mock(
+        return_value=httpx.Response(200, json=catalog)
+    )
+    # Non-empty query keeps only matching hubs.
+    out = _text(await seeded_server.call_tool("search_hubs", {"query": "diy"}))
+    assert "21976" in out
+    assert "diy" in out
+    assert "programming" not in out
+    # Empty query lists the whole catalog.
+    out_all = _text(await seeded_server.call_tool("search_hubs", {"query": ""}))
+    assert "programming" in out_all
+    assert "diy" in out_all
 
 
 @respx.mock

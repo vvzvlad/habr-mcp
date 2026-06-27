@@ -31,6 +31,7 @@ from src.formatting import (
     format_article_list,
     format_comments,
     format_draft,
+    html_to_text,
 )
 from src.registry import ClientRegistry
 from src.settings import Settings
@@ -652,6 +653,51 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             else:
                 lines.append(f"{alias} → не найден")
         return "\n".join(lines) if lines else "Не передано ни одного алиаса."
+
+    @mcp.tool(
+        name="search_hubs",
+        description=(
+            "Ищет хабы Habr по подстроке в названии/алиасе (пустой query — весь "
+            "список, до limit), требует авторского логина (habr_login), возвращает "
+            "строки 'id  alias  title'; id используется в аргументе hubs у "
+            "create_draft."
+        ),
+    )
+    async def search_hubs(ctx: Context, query: str = "", limit: int = 40) -> str:
+        client, msg = await _ready_client(ctx)
+        if msg:
+            return msg
+        try:
+            catalog = await client.suggest_hubs()
+        except HabrApiError as exc:
+            return str(exc)
+        # Flatten all hub groups and dedup by numeric id.
+        hubs_by_id: dict[str, dict[str, Any]] = {}
+        for group in ("collective", "offtopic", "corporative", "byPost"):
+            for hub in catalog.get(group) or []:
+                if isinstance(hub, dict) and hub.get("id") is not None:
+                    hubs_by_id.setdefault(str(hub["id"]), hub)
+        q = query.strip().lower()
+        lines: list[str] = []
+        total = 0
+        for hid, hub in hubs_by_id.items():
+            alias = hub.get("alias") or ""
+            # Prefer the raw plain title; only strip HTML when it is absent,
+            # otherwise html_to_text mangles a present plain title.
+            title = hub.get("title") or html_to_text(hub.get("titleHtml") or "")
+            if q and q not in alias.lower() and q not in title.lower():
+                continue
+            total += 1
+            if len(lines) < limit:
+                lines.append(f"{hid}  {alias}  {title}")
+        if not lines:
+            if query:
+                return f"Хабы по запросу '{query}' не найдены."
+            return "Хабы не найдены."
+        shown = len(lines)
+        if total > shown:
+            lines.append(f"… показано {shown} из {total}")
+        return "\n".join(lines)
 
     @mcp.tool(
         name="list_flows",
