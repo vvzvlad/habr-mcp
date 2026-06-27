@@ -1149,20 +1149,105 @@ def test_serialize_source_keeps_unicode():
 # --- preview_text ------------------------------------------------------------
 
 
-def test_preview_text_concatenates_all_body_text():
+def test_preview_text_uses_lead_paragraph_only():
+    # A single leading paragraph long enough to satisfy the target becomes the
+    # whole announce; the heading title before it does NOT leak in.
+    hook = (
+        "Этот вводный абзац служит крючком и сделан достаточно длинным, чтобы один "
+        "он уже перекрывал целевую длину анонса до ката без добавления второго "
+        "абзаца, поэтому именно он целиком и без посторонних вставок становится "
+        "текстом сгенерированного анонса этой статьи."
+    )
+    assert len(hook) >= 220  # the lead paragraph alone covers the target
     habr = docmost_to_habr_doc(
         _doc(
             {"type": "heading", "attrs": {"level": 1}, "content": [_text("Заголовок")]},
-            {"type": "paragraph", "content": [_text("Первый абзац.")]},
+            {"type": "paragraph", "content": [_text(hook)]},
             {"type": "paragraph", "content": [_text("Второй абзац.")]},
         )
     )
     text = preview_text(habr)
-    # All body blocks contribute, joined by single spaces in document order.
-    assert text == "Заголовок Первый абзац. Второй абзац."
+    assert text == hook
+    assert "Заголовок" not in text
+    assert "Второй абзац." not in text
+
+
+def test_preview_text_lead_paragraph_excludes_headings_tables_code():
+    # Key regression: announce is the leading paragraph prose only — no heading
+    # titles, no table cell text, no code source mixed in.
+    hook = (
+        "Это первый абзац статьи: достаточно длинный текст-крючок, который должен "
+        "стать анонсом до ката и перекрыть целевую длину в двести двадцать "
+        "символов, чтобы накопление прозы остановилось именно на этом первом "
+        "абзаце целиком и ничего постороннего в анонс не попало."
+    )
+    assert len(hook) >= 220
+    habr = docmost_to_habr_doc(
+        _doc(
+            {"type": "heading", "attrs": {"level": 1}, "content": [_text("Заголовок")]},
+            {"type": "paragraph", "content": [_text(hook)]},
+            {"type": "heading", "attrs": {"level": 2}, "content": [_text("Раздел")]},
+            {"type": "paragraph", "content": [_text("вторая часть")]},
+            {
+                "type": "table",
+                "content": [
+                    {
+                        "type": "tableRow",
+                        "content": [_table_cell("tableCell", "ЯЧЕЙКА")],
+                    }
+                ],
+            },
+            {
+                "type": "codeBlock",
+                "attrs": {"language": "python"},
+                "content": [_text("КОД")],
+            },
+        )
+    )
+    text = preview_text(habr)
+    assert text.startswith(hook[:40])
+    assert "Заголовок" not in text
+    assert "Раздел" not in text
+    assert "ЯЧЕЙКА" not in text
+    assert "КОД" not in text
+
+
+def test_preview_text_accumulates_short_leading_paragraphs():
+    # Several short leading paragraphs accumulate until the target (>=220) is
+    # reached; non-paragraph blocks in between are still skipped.
+    p1 = "А" * 80
+    p2 = "Б" * 80
+    p3 = "В" * 80
+    habr = docmost_to_habr_doc(
+        _doc(
+            {"type": "heading", "attrs": {"level": 1}, "content": [_text("Заголовок")]},
+            {"type": "paragraph", "content": [_text(p1)]},
+            {"type": "paragraph", "content": [_text(p2)]},
+            {"type": "paragraph", "content": [_text(p3)]},
+            {"type": "paragraph", "content": [_text("лишний абзац")]},
+            {
+                "type": "table",
+                "content": [
+                    {
+                        "type": "tableRow",
+                        "content": [_table_cell("tableCell", "ЯЧЕЙКА")],
+                    }
+                ],
+            },
+        )
+    )
+    text = preview_text(habr)
+    # 80 + 80 = 160 < 220, so the third paragraph is needed to reach the target.
+    assert text == f"{p1} {p2} {p3}"
+    assert len(text) >= 220
+    assert "Заголовок" not in text
+    assert "ЯЧЕЙКА" not in text
+    assert "лишний абзац" not in text
 
 
 def test_preview_text_collects_list_quote_and_spoiler_text():
+    # No leading paragraph prose anywhere (only list/quote/callout blocks), so the
+    # fallback concatenation kicks in and still surfaces their text.
     habr = docmost_to_habr_doc(
         _doc(
             {

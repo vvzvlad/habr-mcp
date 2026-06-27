@@ -48,6 +48,11 @@ _MAX_HEADING_LEVEL = 3
 # clear error instead of silently padding.
 _PREVIEW_MAX_CHARS = 3000
 
+# Target length for an auto-generated announce: accumulate leading paragraph
+# prose until at least this many characters are collected, then stop. This keeps
+# the teaser to roughly the first paragraph (or first couple of short ones).
+_PREVIEW_TARGET_CHARS = 220
+
 # Docmost mark type -> Habr mark type. Marks not listed here are either dropped
 # silently (highlight/textStyle/comment) or dropped with a warning (anything
 # truly unknown). ``link`` is handled specially (its attrs are rewritten).
@@ -823,11 +828,16 @@ def serialize_source(habr_doc: dict) -> str:
 def preview_text(habr_doc: dict, announce: str | None = None) -> str:
     """Derive the announce ("preview") plain text for a Habr post.
 
-    If ``announce`` is given, its stripped value is used. Otherwise the plain
-    text of ALL body blocks is concatenated in document order (paragraphs,
-    headings, list items, blockquotes, spoiler content — every ``text`` node),
-    joined by single spaces with collapsed whitespace. The result is hard-capped
-    at ``_PREVIEW_MAX_CHARS`` (3000), trimmed on a word boundary when possible.
+    If ``announce`` is given, its stripped value is used. Otherwise the announce
+    is built as a clean lead-paragraph teaser: only the FIRST body ``paragraph``
+    blocks contribute, in document order, accumulating their collapsed text until
+    at least ``_PREVIEW_TARGET_CHARS`` characters are gathered. Every non-paragraph
+    block (heading, table_wrapper, code_block, lists, blockquote, spoiler, hr, …)
+    is skipped so heading titles, table cells and code never leak into the teaser.
+    As a fallback — when the body has no paragraph prose at all (e.g. only code
+    blocks or tables) — the plain text of ALL blocks is concatenated instead so
+    such docs still get a non-empty announce. The result is hard-capped at
+    ``_PREVIEW_MAX_CHARS`` (3000), trimmed on a word boundary when possible.
 
     Habr requires the rendered announce to be 100..3000 chars; this function
     enforces only the upper bound (never pads). The lower bound is the caller's
@@ -836,16 +846,35 @@ def preview_text(habr_doc: dict, announce: str | None = None) -> str:
     if announce is not None:
         text = announce.strip()
     else:
-        # Collect each top-level block's text separately, then join blocks with a
-        # space so adjacent paragraphs/headings/items do not run together. Within
-        # a block, collapse any whitespace (hardBreak/code newlines) to a space.
-        # Use the preview collector so code_block source text contributes too.
-        block_texts: list[str] = []
+        # Lead-paragraph teaser: walk the body in order and collect text from
+        # ``paragraph`` blocks ONLY, skipping every other block type. Within a
+        # paragraph, collapse whitespace (hardBreak newlines) to single spaces.
+        # Stop once the running length reaches the target so the teaser stays
+        # close to the first paragraph (or first couple of short paragraphs).
+        para_texts: list[str] = []
+        running = 0
         for block in habr_doc.get("content") or []:
-            collapsed = " ".join(_collect_preview_text(block).split())
-            if collapsed:
-                block_texts.append(collapsed)
-        text = " ".join(block_texts)
+            if not isinstance(block, dict) or block.get("type") != "paragraph":
+                continue
+            collapsed = " ".join(_collect_plain_text(block).split())
+            if not collapsed:
+                continue
+            para_texts.append(collapsed)
+            running += len(collapsed)
+            if running >= _PREVIEW_TARGET_CHARS:
+                break
+        if para_texts:
+            text = " ".join(para_texts)
+        else:
+            # Fallback for paragraph-less bodies (code-only / table-only docs):
+            # concatenate every block's text so the announce is still non-empty.
+            # Use the preview collector so code_block source text contributes too.
+            block_texts: list[str] = []
+            for block in habr_doc.get("content") or []:
+                collapsed = " ".join(_collect_preview_text(block).split())
+                if collapsed:
+                    block_texts.append(collapsed)
+            text = " ".join(block_texts)
 
     if len(text) > _PREVIEW_MAX_CHARS:
         capped = text[:_PREVIEW_MAX_CHARS].rstrip()
