@@ -41,8 +41,9 @@ _INLINE_OBJECT_SENTINEL = ""
 # Soft line break (Shift+Enter inside a paragraph) shows up as a vertical tab.
 _SOFT_BREAK = "\v"
 
-# namedStyleType values that map to a heading. TITLE/SUBTITLE map to levels 1/2;
-# the Habr converter clamps everything into 1..3 anyway.
+# namedStyleType values that map to a heading. SUBTITLE maps to level 2; the Habr
+# converter clamps everything into 1..3 anyway. TITLE is handled separately (see
+# ``_TITLE_STYLE``) and is NOT a heading.
 _HEADING_LEVELS = {
     "HEADING_1": 1,
     "HEADING_2": 2,
@@ -50,9 +51,13 @@ _HEADING_LEVELS = {
     "HEADING_4": 4,
     "HEADING_5": 5,
     "HEADING_6": 6,
-    "TITLE": 1,
     "SUBTITLE": 2,
 }
+
+# A Google Docs TITLE paragraph is the document's title. In Habr the post title is
+# a separate field, so emitting TITLE as an in-body heading would duplicate the
+# article title; TITLE paragraphs are dropped from the body instead.
+_TITLE_STYLE = "TITLE"
 
 # paragraphStyle.alignment -> Docmost paragraph attrs.textAlign. START and the
 # unspecified value are omitted entirely (no textAlign key).
@@ -507,6 +512,15 @@ def _build_paragraph_blocks(
     """
     style = paragraph.get("paragraphStyle") or {}
     named = style.get("namedStyleType")
+    if named == _TITLE_STYLE:
+        # The document TITLE maps to the Habr post title (a separate field), so it
+        # must not be duplicated as an in-body heading. Drop the paragraph.
+        _warn_once(
+            warnings,
+            seen,
+            "document TITLE dropped from body (it maps to the article title)",
+        )
+        return []
     alignment = style.get("alignment")
     align = _ALIGNMENT_MAP.get(alignment) if isinstance(alignment, str) else None
 
@@ -800,7 +814,7 @@ def _is_code_line(paragraph: dict) -> bool:
     """
     style = paragraph.get("paragraphStyle") or {}
     named = style.get("namedStyleType")
-    if isinstance(named, str) and named in _HEADING_LEVELS:
+    if isinstance(named, str) and (named in _HEADING_LEVELS or named == _TITLE_STYLE):
         return False
     elements = paragraph.get("elements") or []
     saw_text_run = False

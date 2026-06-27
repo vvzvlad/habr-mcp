@@ -109,11 +109,29 @@ def test_heading_levels():
         assert blocks[0]["attrs"]["level"] == level
 
 
-def test_title_and_subtitle_map_to_levels_1_and_2():
-    title = _blocks(_para(_run("T\n"), style={"namedStyleType": "TITLE"}))[0]
+def test_title_dropped_subtitle_maps_to_level_2():
+    # A Google Docs TITLE is the document title; in Habr the post title is a
+    # separate field, so a TITLE paragraph is dropped from the body (with a once
+    # warning) instead of being emitted as a heading that duplicates the title.
+    warnings: list[str] = []
+    title_blocks = gdoc_to_docmost_doc(
+        _gdoc(_para(_run("T\n"), style={"namedStyleType": "TITLE"})), warnings
+    )["content"]
+    assert title_blocks == []
+    assert any("TITLE" in w for w in warnings)
     subtitle = _blocks(_para(_run("S\n"), style={"namedStyleType": "SUBTITLE"}))[0]
-    assert title["type"] == "heading" and title["attrs"]["level"] == 1
     assert subtitle["type"] == "heading" and subtitle["attrs"]["level"] == 2
+
+
+def test_leading_title_not_duplicated_in_body():
+    # Regression: a leading TITLE (typically identical to the article title) must
+    # not be emitted as an in-body heading and duplicate the Habr post title.
+    blocks = _blocks(
+        _para(_run("My Article\n"), style={"namedStyleType": "TITLE"}),
+        _para(_run("Intro paragraph\n"), style={"namedStyleType": "NORMAL_TEXT"}),
+    )
+    assert [b["type"] for b in blocks] == ["paragraph"]
+    assert blocks[0]["content"][0]["text"] == "Intro paragraph"
 
 
 def test_normal_text_is_paragraph():
@@ -800,9 +818,11 @@ def test_pipeline_composes_with_docmost_to_habr():
     intermediate = gdoc_to_docmost_doc(doc)
     habr = docmost_to_habr_doc(intermediate)
     types = [b["type"] for b in habr["content"]]
-    assert types == ["heading", "paragraph", "ordered_list"]
+    # The leading TITLE is dropped (it maps to the post title), so the body starts
+    # at the paragraph.
+    assert types == ["paragraph", "ordered_list"]
     # The bold mark survives the full pipeline.
-    bold_run = habr["content"][1]["content"][1]
+    bold_run = habr["content"][0]["content"][1]
     assert {"type": "bold"} in bold_run["marks"]
     # The list uses the canonical Habr "listitem" naming.
     assert "list_item" not in json.dumps(habr)
