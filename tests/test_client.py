@@ -11,6 +11,7 @@ from src.client import (
     MISSING_CREDS_MESSAGE,
     HabrApiError,
     HabrClient,
+    _cookie_interface_lang,
     fetch_csrf_token,
 )
 
@@ -1127,3 +1128,89 @@ async def test_fetch_csrf_token_missing_returns_none(anon_settings):
 async def test_fetch_csrf_token_network_error_returns_none(anon_settings):
     respx.get(_CSRF_PROBE_URL).mock(side_effect=httpx.ConnectError("boom"))
     assert await fetch_csrf_token("cookie=1", anon_settings) is None
+
+
+@respx.mock
+async def test_fetch_csrf_token_hl_en_hits_en_feed(anon_settings):
+    # Regression: an `hl=en` cookie must probe the /en/ feed directly so no
+    # language redirect strips the Cookie header and the csrf meta is found.
+    en_route = respx.get("https://habr.com/en/feed/").mock(
+        return_value=httpx.Response(
+            200, text='<meta name="csrf-token" content="EN_TOK">'
+        )
+    )
+    ru_route = respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(200, text="<html>no token here</html>")
+    )
+    assert await fetch_csrf_token("hl=en; cookie=1", anon_settings) == "EN_TOK"
+    assert en_route.called
+    assert not ru_route.called
+
+
+@respx.mock
+async def test_fetch_csrf_token_manual_redirect_preserves_cookie(anon_settings):
+    # A 302 must be followed manually with the Cookie re-sent so the target page
+    # loads as the logged-in session and carries the csrf meta.
+    target = "https://habr.com/ru/feed/articles/"
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(302, headers={"location": target})
+    )
+    respx.get(target).mock(
+        return_value=httpx.Response(
+            200, text='<meta name="csrf-token" content="REDIR_TOK">'
+        )
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) == "REDIR_TOK"
+
+
+@respx.mock
+async def test_fetch_csrf_token_cross_host_redirect_not_followed(anon_settings):
+    # Security: a redirect to an external host must NOT be followed with the
+    # session Cookie re-sent, so an external page's csrf meta is never picked up.
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(
+            302, headers={"location": "https://evil.example.com/steal"}
+        )
+    )
+    evil_route = respx.get("https://evil.example.com/steal").mock(
+        return_value=httpx.Response(
+            200, text='<meta name="csrf-token" content="LEAKED">'
+        )
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) is None
+    assert evil_route.call_count == 0
+
+
+@respx.mock
+async def test_fetch_csrf_token_subdomain_redirect_not_followed(anon_settings):
+    # Security: a redirect to a DIFFERENT host (even a habr.com subdomain) must
+    # NOT be followed with the session Cookie re-sent.
+    respx.get(_CSRF_PROBE_URL).mock(
+        return_value=httpx.Response(
+            302, headers={"location": "https://x.habr.com/steal"}
+        )
+    )
+    sub_route = respx.get("https://x.habr.com/steal").mock(
+        return_value=httpx.Response(
+            200, text='<meta name="csrf-token" content="LEAKED">'
+        )
+    )
+    assert await fetch_csrf_token("cookie=1", anon_settings) is None
+    assert sub_route.call_count == 0
+
+
+def test_cookie_interface_lang():
+    assert _cookie_interface_lang("hl=en,ru; foo=bar") == "en"
+    assert _cookie_interface_lang("foo=bar; baz=1") == "ru"
+
+
+def test_cookie_interface_lang_tolerates_spaces():
+    assert _cookie_interface_lang("hl = en ; x=1") == "en"
+
+
+def test_cookie_interface_lang_rejects_malformed():
+    # A malformed hl value must fall back to the default rather than corrupt the
+    # probe URL path; uppercase doesn't match the lowercase 2-letter pattern.
+    assert _cookie_interface_lang("hl=en/feed") == "ru"
+    assert _cookie_interface_lang("hl=EN") == "ru"
+    assert _cookie_interface_lang("hl=en") == "en"

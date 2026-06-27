@@ -64,8 +64,17 @@ _CSRF_META_RE_REV = re.compile(
     r'<meta[^>]*\bcontent=["\']([^"\']+)["\'][^>]*\bname=["\']csrf-token["\']'
 )
 
-# Page that reliably carries the csrf-token meta tag for a logged-in session.
-_CSRF_PROBE_URL = "https://habr.com/ru/feed/"
+# The csrf-token meta lives on the logged-in feed page. The URL language segment
+# MUST match the session's interface language (the `hl` cookie): requesting the
+# wrong language (e.g. /ru/feed/ for an `hl=en` session) triggers a 302 to the
+# other language, and httpx drops the manually-set Cookie header across that
+# redirect — so the redirected page loads anonymously and carries no csrf meta.
+_CSRF_FEED_URL_TEMPLATE = "https://habr.com/{lang}/feed/"
+_CSRF_DEFAULT_LANG = "ru"
+
+# A sane interface-language token (e.g. "ru", "en"); anything else falls back to
+# the default so a malformed `hl` cookie cannot corrupt the probe URL path.
+_LANG_RE = re.compile(r"^[a-z]{2}$")
 
 # Habr rejects an announce (postForm.preview) shorter than this many rendered
 # characters with HTTP 422 ("Аннотация не может быть короче 100 символов …").
@@ -113,26 +122,73 @@ def _wrap_html(text: str) -> str:
     return "<p>" + html_module.escape(text, quote=False) + "</p>"
 
 
-async def fetch_csrf_token(cookie: str, settings: Settings) -> str | None:
-    """Scrape the csrf-token from the Habr feed page for a logged-in Cookie.
+def _cookie_interface_lang(cookie: str) -> str:
+    """Return the interface language (`hl` cookie) so the csrf probe hits the
+    matching feed URL and avoids a language redirect. `hl` may be like 'en' or
+    'en,ru' — take the first token. Defaults to 'ru' when absent."""
+    for part in cookie.split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name.strip() == "hl":
+            first = value.split(",")[0].strip()
+            # Only accept a simple language code (e.g. "ru", "en"); a malformed
+            # value like "en/feed" must not leak into the probe URL path.
+            if _LANG_RE.fullmatch(first):
+                return first
+    return _CSRF_DEFAULT_LANG
 
-    GETs ``https://habr.com/ru/feed/`` with the given Cookie header (browser-like
-    UA, configured proxy/timeout) and reads the ``<meta name="csrf-token">`` tag.
-    Returns the token, or None when it cannot be found or a network error occurs.
+
+async def _get_preserving_cookie(client, url, headers, max_hops=3):
+    """GET `url`, manually following SAME-HOST redirects while re-sending
+    `headers` (incl. Cookie). httpx strips a manually-set Cookie header on
+    redirect; we re-send it, but ONLY while the target host matches the original
+    so the session Cookie is never leaked to an external redirect target."""
+    origin = urlsplit(url)
+    current = url
+    for _ in range(max_hops + 1):
+        response = await client.get(current, headers=headers)
+        if not response.is_redirect:
+            return response
+        location = response.headers.get("location")
+        if not location:
+            return response
+        nxt = str(response.url.join(location))
+        nxt_parts = urlsplit(nxt)
+        if (nxt_parts.scheme, nxt_parts.netloc) != (origin.scheme, origin.netloc):
+            # Cross-origin redirect (host or scheme changed): do NOT forward the
+            # session Cookie (a scheme downgrade would leak it over plaintext).
+            # Stop here; the body carries no csrf meta and the caller gets None.
+            return response
+        current = nxt
+    return response
+
+
+async def fetch_csrf_token(cookie: str, settings: Settings) -> str | None:
+    """Scrape the csrf-token meta from the logged-in feed page for a Cookie.
+
+    The feed URL language matches the session (`hl` cookie) to avoid a language
+    redirect that would strip the Cookie header; any redirect that still occurs
+    is followed manually with the Cookie re-sent. Returns the token, or None.
     """
     headers = {"User-Agent": settings.user_agent, "Cookie": cookie}
-    try:
-        async with httpx.AsyncClient(
-            timeout=settings.request_timeout,
-            proxy=settings.proxy or None,
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(_CSRF_PROBE_URL, headers=headers)
-    except httpx.HTTPError:
-        return None
-    body = response.text or ""
-    match = _CSRF_META_RE.search(body) or _CSRF_META_RE_REV.search(body)
-    return match.group(1) if match else None
+    url = _CSRF_FEED_URL_TEMPLATE.format(lang=_cookie_interface_lang(cookie))
+    # Retry the whole fetch twice. This intentionally also covers a clean 200
+    # that carried no csrf meta (a transient anonymous-looking render), not only
+    # an httpx.HTTPError — a second attempt can ride out such a transient miss.
+    for _attempt in range(2):
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.request_timeout,
+                proxy=settings.proxy or None,
+                follow_redirects=False,
+            ) as client:
+                response = await _get_preserving_cookie(client, url, headers)
+        except httpx.HTTPError:
+            continue
+        body = response.text or ""
+        match = _CSRF_META_RE.search(body) or _CSRF_META_RE_REV.search(body)
+        if match:
+            return match.group(1)
+    return None
 
 
 class HabrClient:
