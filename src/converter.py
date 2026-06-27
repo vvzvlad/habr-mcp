@@ -42,6 +42,12 @@ from typing import Any
 _MIN_HEADING_LEVEL = 1
 _MAX_HEADING_LEVEL = 3
 
+# Subtrees whose descendant headings must NOT count toward the document's heading
+# baseline. The converter flattens any non-paragraph table-cell content to plain
+# text, so a heading inside a cell never renders as a heading and must not skew
+# the normalization baseline.
+_NON_HEADING_SUBTREES = {"table", "tableRow", "tableCell", "tableHeader"}
+
 # Habr requires the rendered announce (postForm.preview) text to be 100..3000
 # characters (HTTP 422 otherwise). We hard-cap at the upper bound here; the
 # lower bound is enforced by the caller (client.create_draft), which can raise a
@@ -99,6 +105,35 @@ def _as_doc(value: Any) -> dict:
     if isinstance(content, list):
         return {"type": "doc", "content": content}
     raise ValueError("not a ProseMirror document")
+
+
+# --- Heading-level normalization --------------------------------------------
+
+
+def _min_heading_level(doc: dict) -> int:
+    """Smallest heading level used anywhere in the doc that will actually render
+    as a heading (default 1). Used to normalize so the document's top heading
+    becomes Habr level 1 (<h2>); Docmost bodies usually start at H2 because the
+    page title is a separate field. Table cells are skipped because the converter
+    flattens any non-paragraph cell content to plain text, so a heading inside a
+    cell never renders as a heading and must not skew the baseline."""
+    levels: list[int] = []
+
+    def visit(n: Any) -> None:
+        if not isinstance(n, dict):
+            return
+        if n.get("type") in _NON_HEADING_SUBTREES:
+            return
+        if n.get("type") == "heading":
+            try:
+                levels.append(int((n.get("attrs") or {}).get("level", 1)))
+            except (TypeError, ValueError):
+                levels.append(1)
+        for child in n.get("content") or []:
+            visit(child)
+
+    visit(doc)
+    return min(levels) if levels else 1
 
 
 # --- Warning bookkeeping -----------------------------------------------------
@@ -366,16 +401,25 @@ def _build_paragraph(
 
 def _build_heading(
     node: dict,
+    heading_min_level: int,
     warnings: list[str] | None,
     seen: set[str],
 ) -> dict:
-    """Build a Habr ``heading`` with level clamped to 1..3 (default 1)."""
+    """Build a Habr ``heading`` normalized against ``heading_min_level`` then
+    clamped to 1..3 (default 1).
+
+    Normalization shifts every heading so the document's top heading level maps
+    to Habr level 1 (<h2>); Docmost bodies usually start at H2 because the page
+    title is a separate field, so without this the whole document would render
+    one size too small.
+    """
     raw_level = (node.get("attrs") or {}).get("level", 1)
     try:
-        level = int(raw_level)
+        raw = int(raw_level)
     except (TypeError, ValueError):
-        level = 1
-    level = max(_MIN_HEADING_LEVEL, min(_MAX_HEADING_LEVEL, level))
+        raw = 1
+    level = raw - heading_min_level + 1  # normalize: doc's top heading -> 1
+    level = max(_MIN_HEADING_LEVEL, min(_MAX_HEADING_LEVEL, level))  # clamp 1..3
     return {
         "type": "heading",
         "attrs": {"level": level, "class": None},
@@ -585,6 +629,7 @@ def _convert_blocks(
     warnings: list[str] | None,
     seen: set[str],
     nested_list: bool = False,
+    heading_min_level: int = 1,
 ) -> list[dict]:
     """Convert a list of Docmost block nodes into a flat list of Habr blocks.
 
@@ -592,6 +637,8 @@ def _convert_blocks(
     stream) and unknown atoms are dropped; both record a warning. ``nested_list``
     is True while converting a listitem's children, so a list directly inside a
     list item is tagged ``attrs.type:"inner"`` instead of ``"outer"``.
+    ``heading_min_level`` is the doc-wide heading baseline threaded down so every
+    heading (at any nesting depth) normalizes against the same value.
     """
     result: list[dict] = []
     if not isinstance(children, list):
@@ -600,7 +647,9 @@ def _convert_blocks(
         if not isinstance(child, dict):
             continue
         result.extend(
-            _convert_block(child, image_url_map, warnings, seen, nested_list)
+            _convert_block(
+                child, image_url_map, warnings, seen, nested_list, heading_min_level
+            )
         )
     return result
 
@@ -611,19 +660,22 @@ def _convert_block(
     warnings: list[str] | None,
     seen: set[str],
     nested_list: bool = False,
+    heading_min_level: int = 1,
 ) -> list[dict]:
     """Convert a single Docmost block node into zero or more Habr blocks.
 
     Returns a list so a node can expand to several blocks (e.g. a flattened
     wrapper) or to none (e.g. a dropped atom or an unmapped image).
     ``nested_list`` controls the list ``attrs.type`` (inner vs outer).
+    ``heading_min_level`` is the doc-wide heading baseline used to normalize
+    heading levels regardless of nesting depth.
     """
     ntype = node.get("type")
 
     if ntype == "paragraph":
         return [_build_paragraph(node, warnings, seen)]
     if ntype == "heading":
-        return [_build_heading(node, warnings, seen)]
+        return [_build_heading(node, heading_min_level, warnings, seen)]
     if ntype == "codeBlock":
         return [_build_code_block(node)]
     if ntype == "horizontalRule":
@@ -644,6 +696,7 @@ def _convert_block(
             warnings,
             seen,
             nested_list=True if is_list_item else nested_list,
+            heading_min_level=heading_min_level,
         )
         if is_list_item:
             # Block content other than paragraphs and nested lists may be
@@ -672,11 +725,19 @@ def _convert_block(
         callout_type = (node.get("attrs") or {}).get("type")
         key = callout_type.lower() if isinstance(callout_type, str) else ""
         title = _CALLOUT_TITLES.get(key, _CALLOUT_DEFAULT_TITLE)
-        inner = _convert_blocks(node.get("content"), image_url_map, warnings, seen)
+        inner = _convert_blocks(
+            node.get("content"),
+            image_url_map,
+            warnings,
+            seen,
+            heading_min_level=heading_min_level,
+        )
         return [_build_spoiler(title, inner)]
 
     if ntype == "details":
-        return [_convert_details(node, image_url_map, warnings, seen)]
+        return [
+            _convert_details(node, image_url_map, warnings, seen, heading_min_level)
+        ]
 
     if ntype == "image":
         built = _build_image(node, image_url_map, warnings)
@@ -718,7 +779,9 @@ def _convert_block(
     children = node.get("content")
     if isinstance(children, list) and children:
         _warn(warnings, f"unsupported block flattened: {ntype}")
-        return _convert_blocks(children, image_url_map, warnings, seen, nested_list)
+        return _convert_blocks(
+            children, image_url_map, warnings, seen, nested_list, heading_min_level
+        )
     _warn(warnings, f"unsupported block dropped: {ntype}")
     return []
 
@@ -728,11 +791,13 @@ def _convert_details(
     image_url_map: dict[str, str] | None,
     warnings: list[str] | None,
     seen: set[str],
+    heading_min_level: int = 1,
 ) -> dict:
     """Convert a Docmost ``details`` node into a Habr ``spoiler``.
 
     Title comes from the ``detailsSummary`` child's text; content comes from the
-    converted block children of the ``detailsContent`` child.
+    converted block children of the ``detailsContent`` child. ``heading_min_level``
+    is threaded so headings inside the spoiler normalize against the doc baseline.
     """
     summary_text = ""
     content_children: list[dict] = []
@@ -744,7 +809,11 @@ def _convert_details(
             summary_text = _collect_plain_text(child)
         elif ctype == "detailsContent":
             content_children = _convert_blocks(
-                child.get("content"), image_url_map, warnings, seen
+                child.get("content"),
+                image_url_map,
+                warnings,
+                seen,
+                heading_min_level=heading_min_level,
             )
     title = summary_text.strip() or "Спойлер"
     return _build_spoiler(title, content_children)
@@ -780,7 +849,16 @@ def docmost_to_habr_doc(
     """
     doc = _as_doc(docmost_doc)
     seen: set[str] = set()
-    content = _convert_blocks(doc.get("content"), image_url_map, warnings, seen)
+    # Normalize so the document's top heading becomes Habr level 1 (<h2>); Docmost
+    # bodies usually start at H2 because the page title is a separate field.
+    heading_min_level = _min_heading_level(doc)
+    content = _convert_blocks(
+        doc.get("content"),
+        image_url_map,
+        warnings,
+        seen,
+        heading_min_level=heading_min_level,
+    )
     return {"type": "doc", "content": content}
 
 

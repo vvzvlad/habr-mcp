@@ -63,10 +63,126 @@ def test_heading_level_clamp_low():
     assert heading["attrs"] == {"level": 1, "class": None}
 
 
-def test_heading_level_clamp_high():
+def test_heading_lone_h5_normalizes_to_level_one():
+    # With doc-wide normalization a LONE H5 is the document's top heading, so its
+    # min level (5) becomes Habr level 1 -- not clamped down to 3.
     src = _doc({"type": "heading", "attrs": {"level": 5}, "content": [_text("H")]})
     heading = docmost_to_habr_doc(src)["content"][0]
-    assert heading["attrs"]["level"] == 3
+    assert heading["attrs"]["level"] == 1
+
+
+def test_heading_level_clamp_high():
+    # A real upper-clamp case: min=1 (H1), so H7 normalizes to 7 then clamps to 3.
+    src = _doc(
+        {"type": "heading", "attrs": {"level": 1}, "content": [_text("A")]},
+        {"type": "heading", "attrs": {"level": 7}, "content": [_text("B")]},
+    )
+    out = docmost_to_habr_doc(src)["content"]
+    assert out[0]["attrs"]["level"] == 1
+    assert out[1]["attrs"]["level"] == 3
+
+
+def test_heading_top_h2_h3_normalize_to_one_and_two():
+    # Key regression: a body that starts at H2 must yield Habr level-1 headings.
+    src = _doc(
+        {"type": "heading", "attrs": {"level": 2}, "content": [_text("A")]},
+        {"type": "heading", "attrs": {"level": 3}, "content": [_text("B")]},
+    )
+    out = docmost_to_habr_doc(src)["content"]
+    assert out[0]["attrs"]["level"] == 1
+    assert out[1]["attrs"]["level"] == 2
+
+
+def test_heading_h1_h2_h3_normalize_to_one_two_three():
+    src = _doc(
+        {"type": "heading", "attrs": {"level": 1}, "content": [_text("A")]},
+        {"type": "heading", "attrs": {"level": 2}, "content": [_text("B")]},
+        {"type": "heading", "attrs": {"level": 3}, "content": [_text("C")]},
+    )
+    out = docmost_to_habr_doc(src)["content"]
+    assert [h["attrs"]["level"] for h in out] == [1, 2, 3]
+
+
+def test_heading_only_h3_normalizes_to_one():
+    src = _doc({"type": "heading", "attrs": {"level": 3}, "content": [_text("H")]})
+    heading = docmost_to_habr_doc(src)["content"][0]
+    assert heading["attrs"]["level"] == 1
+
+
+def test_heading_h2_h5_gap_normalizes_to_one_and_clamped_three():
+    # min=2; H5 -> 5-2+1 = 4 -> clamped to 3.
+    src = _doc(
+        {"type": "heading", "attrs": {"level": 2}, "content": [_text("A")]},
+        {"type": "heading", "attrs": {"level": 5}, "content": [_text("B")]},
+    )
+    out = docmost_to_habr_doc(src)["content"]
+    assert out[0]["attrs"]["level"] == 1
+    assert out[1]["attrs"]["level"] == 3
+
+
+def test_heading_nested_in_callout_uses_doc_wide_min_level():
+    # Top-level H2 sets the baseline (min=2); an H3 inside a callout/spoiler must
+    # normalize against that same doc-wide min -> level 2, not 1.
+    src = _doc(
+        {"type": "heading", "attrs": {"level": 2}, "content": [_text("Top")]},
+        {
+            "type": "callout",
+            "attrs": {"type": "info"},
+            "content": [
+                {
+                    "type": "heading",
+                    "attrs": {"level": 3},
+                    "content": [_text("Inside")],
+                }
+            ],
+        },
+    )
+    out = docmost_to_habr_doc(src)["content"]
+    assert out[0]["type"] == "heading"
+    assert out[0]["attrs"]["level"] == 1
+    spoiler = out[1]
+    assert spoiler["type"] == "spoiler"
+    inner_heading = spoiler["content"][0]
+    assert inner_heading["type"] == "heading"
+    assert inner_heading["attrs"]["level"] == 2
+
+
+def test_heading_in_table_cell_does_not_drag_min_level_down():
+    # A top-level H3 plus a table whose cell contains a heading level 1: the
+    # in-cell heading is flattened to text and must NOT lower the baseline, so the
+    # top-level H3 (min=3) still normalizes to level 1.
+    src = _doc(
+        {"type": "heading", "attrs": {"level": 3}, "content": [_text("Top")]},
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        {
+                            "type": "tableCell",
+                            "content": [
+                                {
+                                    "type": "heading",
+                                    "attrs": {"level": 1},
+                                    "content": [_text("Cell H1")],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    out = docmost_to_habr_doc(src)["content"]
+    assert out[0]["type"] == "heading"
+    assert out[0]["attrs"]["level"] == 1
+
+
+def test_no_headings_doc_converts_without_error():
+    src = _doc({"type": "paragraph", "content": [_text("just text")]})
+    out = docmost_to_habr_doc(src)
+    assert out["content"][0]["type"] == "paragraph"
 
 
 def test_heading_missing_level_defaults_to_one():
