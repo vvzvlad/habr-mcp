@@ -8,7 +8,6 @@ from src.converter import (
     collect_image_srcs,
     docmost_to_habr_doc,
     make_preview_doc,
-    preview_text,
     serialize_source,
 )
 
@@ -1146,263 +1145,60 @@ def test_serialize_source_keeps_unicode():
     assert "привет" in s  # ensure_ascii=False
 
 
-# --- preview_text ------------------------------------------------------------
+# --- make_preview_doc --------------------------------------------------------
+#
+# The announce is a SEPARATE, caller-supplied field — never derived from the
+# article body. ``make_preview_doc`` takes only that text, strips it, hard-caps
+# it at 3000 chars on a word boundary and wraps it in one inline paragraph.
 
 
-def test_preview_text_uses_lead_paragraph_only():
-    # A single leading paragraph long enough to satisfy the target becomes the
-    # whole announce; the heading title before it does NOT leak in.
-    hook = (
-        "Этот вводный абзац служит крючком и сделан достаточно длинным, чтобы один "
-        "он уже перекрывал целевую длину анонса до ката без добавления второго "
-        "абзаца, поэтому именно он целиком и без посторонних вставок становится "
-        "текстом сгенерированного анонса этой статьи."
+def test_make_preview_doc_single_paragraph_no_align():
+    # A teaser >= 100 chars becomes the text of exactly one inline paragraph; the
+    # paragraph carries the canonical attrs and nothing else.
+    announce = (
+        "Это рукописный анонс до ката, который автор пишет сам и который должен "
+        "быть достаточно длинным, чтобы пройти нижнюю границу в сто символов."
     )
-    assert len(hook) >= 220  # the lead paragraph alone covers the target
-    habr = docmost_to_habr_doc(
-        _doc(
-            {"type": "heading", "attrs": {"level": 1}, "content": [_text("Заголовок")]},
-            {"type": "paragraph", "content": [_text(hook)]},
-            {"type": "paragraph", "content": [_text("Второй абзац.")]},
-        )
-    )
-    text = preview_text(habr)
-    assert text == hook
-    assert "Заголовок" not in text
-    assert "Второй абзац." not in text
+    assert len(announce) >= 100
+    preview = make_preview_doc(announce)
+    assert preview["type"] == "doc"
+    assert len(preview["content"]) == 1
+    para = preview["content"][0]
+    assert para["type"] == "paragraph"
+    assert para["attrs"] == {"simple": False, "persona": False}
+    assert para["content"][0]["text"] == announce
 
 
-def test_preview_text_lead_paragraph_excludes_headings_tables_code():
-    # Key regression: announce is the leading paragraph prose only — no heading
-    # titles, no table cell text, no code source mixed in.
-    hook = (
-        "Это первый абзац статьи: достаточно длинный текст-крючок, который должен "
-        "стать анонсом до ката и перекрыть целевую длину в двести двадцать "
-        "символов, чтобы накопление прозы остановилось именно на этом первом "
-        "абзаце целиком и ничего постороннего в анонс не попало."
-    )
-    assert len(hook) >= 220
-    habr = docmost_to_habr_doc(
-        _doc(
-            {"type": "heading", "attrs": {"level": 1}, "content": [_text("Заголовок")]},
-            {"type": "paragraph", "content": [_text(hook)]},
-            {"type": "heading", "attrs": {"level": 2}, "content": [_text("Раздел")]},
-            {"type": "paragraph", "content": [_text("вторая часть")]},
-            {
-                "type": "table",
-                "content": [
-                    {
-                        "type": "tableRow",
-                        "content": [_table_cell("tableCell", "ЯЧЕЙКА")],
-                    }
-                ],
-            },
-            {
-                "type": "codeBlock",
-                "attrs": {"language": "python"},
-                "content": [_text("КОД")],
-            },
-        )
-    )
-    text = preview_text(habr)
-    assert text.startswith(hook[:40])
-    assert "Заголовок" not in text
-    assert "Раздел" not in text
-    assert "ЯЧЕЙКА" not in text
-    assert "КОД" not in text
+def test_make_preview_doc_strips_surrounding_whitespace():
+    preview = make_preview_doc("  Явный анонс.  ")
+    assert preview["content"][0]["content"][0]["text"] == "Явный анонс."
 
 
-def test_preview_text_accumulates_short_leading_paragraphs():
-    # Several short leading paragraphs accumulate until the target (>=220) is
-    # reached; non-paragraph blocks in between are still skipped.
-    p1 = "А" * 80
-    p2 = "Б" * 80
-    p3 = "В" * 80
-    habr = docmost_to_habr_doc(
-        _doc(
-            {"type": "heading", "attrs": {"level": 1}, "content": [_text("Заголовок")]},
-            {"type": "paragraph", "content": [_text(p1)]},
-            {"type": "paragraph", "content": [_text(p2)]},
-            {"type": "paragraph", "content": [_text(p3)]},
-            {"type": "paragraph", "content": [_text("лишний абзац")]},
-            {
-                "type": "table",
-                "content": [
-                    {
-                        "type": "tableRow",
-                        "content": [_table_cell("tableCell", "ЯЧЕЙКА")],
-                    }
-                ],
-            },
-        )
-    )
-    text = preview_text(habr)
-    # 80 + 80 = 160 < 220, so the third paragraph is needed to reach the target.
-    assert text == f"{p1} {p2} {p3}"
-    assert len(text) >= 220
-    assert "Заголовок" not in text
-    assert "ЯЧЕЙКА" not in text
-    assert "лишний абзац" not in text
+def test_make_preview_doc_empty_announce_yields_empty_paragraph():
+    # An empty announce still emits one paragraph (the client gates length before
+    # ever calling this, so make_preview_doc itself does not raise).
+    preview = make_preview_doc("")
+    assert len(preview["content"]) == 1
+    assert preview["content"][0]["content"][0]["text"] == ""
 
 
-def test_preview_text_collects_list_quote_and_spoiler_text():
-    # No leading paragraph prose anywhere (only list/quote/callout blocks), so the
-    # fallback concatenation kicks in and still surfaces their text.
-    habr = docmost_to_habr_doc(
-        _doc(
-            {
-                "type": "bulletList",
-                "content": [
-                    {
-                        "type": "listItem",
-                        "content": [{"type": "paragraph", "content": [_text("item")]}],
-                    }
-                ],
-            },
-            {
-                "type": "blockquote",
-                "content": [{"type": "paragraph", "content": [_text("quote")]}],
-            },
-            {
-                "type": "callout",
-                "attrs": {"type": "info"},
-                "content": [{"type": "paragraph", "content": [_text("note")]}],
-            },
-        )
-    )
-    text = preview_text(habr)
-    assert "item" in text
-    assert "quote" in text
-    assert "note" in text
-
-
-def test_preview_text_uses_explicit_announce():
-    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text("body")]}))
-    text = preview_text(habr, announce="  Явный анонс.  ")
-    assert text == "Явный анонс."
-
-
-def test_preview_text_caps_at_3000_on_word_boundary():
+def test_make_preview_doc_caps_at_3000_on_word_boundary():
     word = "слово "
-    long_text = word * 700  # ~4200 chars
-    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text(long_text)]}))
-    text = preview_text(habr)
+    long_announce = word * 700  # ~4200 chars
+    preview = make_preview_doc(long_announce)
+    text = preview["content"][0]["content"][0]["text"]
     assert len(text) <= 3000
     # Trimmed on a word boundary: no trailing partial word / no dangling space.
     assert not text.endswith(" ")
     assert text.endswith("слово")
 
 
-def test_preview_text_does_not_pad_short_text():
-    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text("hi")]}))
-    assert preview_text(habr) == "hi"
-
-
-def test_preview_text_cap_keeps_most_when_only_early_space():
-    # A long string whose ONLY space is near the start must not collapse to a few
-    # chars: the early word boundary is ignored and the hard 3000-char cut wins.
-    text = "См " + "x" * 3500  # single space at index 2
-    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text(text)]}))
-    out = preview_text(habr)
-    assert len(out) <= 3000
-    assert len(out) >= 1500  # not collapsed to "См"
-
-
-def test_preview_text_collects_code_block_text():
-    # A doc whose only block is a code_block (code in attrs.code, no children)
-    # must still produce a non-empty announce containing that code text.
-    code = "def f():\n    return 42  # " + "a" * 100
-    habr = docmost_to_habr_doc(
-        _doc(
-            {
-                "type": "codeBlock",
-                "attrs": {"language": "python"},
-                "content": [_text(code)],
-            }
-        )
-    )
-    # The Habr code_block stores the source in attrs.code.
-    assert habr["content"][0]["type"] == "code_block"
-    assert len(habr["content"][0]["attrs"]["code"]) >= 100
-    out = preview_text(habr)
-    assert out  # non-empty
-    assert "return 42" in out
-
-
-def test_preview_text_collects_table_cell_text():
-    # The announce derived from a body containing a table must include cell text.
-    habr = docmost_to_habr_doc(
-        _doc(
-            {
-                "type": "table",
-                "content": [
-                    {
-                        "type": "tableRow",
-                        "content": [
-                            _table_cell("tableCell", "ячейка-1"),
-                            _table_cell("tableCell", "ячейка-2"),
-                        ],
-                    }
-                ],
-            }
-        )
-    )
-    out = preview_text(habr)
-    assert "ячейка-1" in out
-    assert "ячейка-2" in out
-
-
-def test_preview_text_empty_for_math_and_embed_only_body():
-    # A body of only a mathBlock (formula, no text) and an embed (no text) yields
-    # an EMPTY announce without raising — formula/embed contribute no preview text.
-    habr = docmost_to_habr_doc(
-        _doc(
-            {"type": "mathBlock", "attrs": {"text": "e=mc^2"}},
-            {"type": "embed", "attrs": {"src": "https://youtu.be/x"}},
-        )
-    )
-    # Body is non-empty (formula + embed nodes present) but carries no text.
-    assert [b["type"] for b in habr["content"]] == ["formula", "embed"]
-    assert preview_text(habr) == ""
-
-
-def test_make_preview_doc_math_and_embed_only_body_no_raise():
-    # make_preview_doc over a text-less body must not raise and emits one empty
-    # paragraph (the caller validates the 100-char lower bound).
-    habr = docmost_to_habr_doc(
-        _doc(
-            {"type": "mathBlock", "attrs": {"text": "a^2"}},
-            {"type": "embed", "attrs": {"src": "https://youtu.be/y"}},
-        )
-    )
-    preview = make_preview_doc(habr)
-    assert len(preview["content"]) == 1
-    assert preview["content"][0]["content"][0]["text"] == ""
-
-
-# --- make_preview_doc --------------------------------------------------------
-
-
-def test_make_preview_doc_single_paragraph_no_align():
-    habr = docmost_to_habr_doc(
-        _doc({"type": "paragraph", "content": [_text("Тело статьи.")]})
-    )
-    preview = make_preview_doc(habr)
-    assert preview["type"] == "doc"
-    assert len(preview["content"]) == 1
-    para = preview["content"][0]
-    assert para["type"] == "paragraph"
-    assert para["attrs"] == {"simple": False, "persona": False}
-    assert para["content"][0]["text"] == "Тело статьи."
-
-
-def test_make_preview_doc_uses_announce():
-    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text("body")]}))
-    preview = make_preview_doc(habr, announce="Переопределённый анонс")
-    assert preview["content"][0]["content"][0]["text"] == "Переопределённый анонс"
-
-
-def test_make_preview_doc_empty_doc_still_one_paragraph():
-    preview = make_preview_doc({"type": "doc", "content": []})
-    assert len(preview["content"]) == 1
-    assert preview["content"][0]["content"][0]["text"] == ""
+def test_make_preview_doc_cap_keeps_most_when_only_early_space():
+    # A long announce whose ONLY space is near the start must not collapse to a
+    # few chars: the early word boundary is ignored and the hard 3000-char cut
+    # wins.
+    announce = "См " + "x" * 3500  # single space at index 2
+    preview = make_preview_doc(announce)
+    text = preview["content"][0]["content"][0]["text"]
+    assert len(text) <= 3000
+    assert len(text) >= 1500  # not collapsed to "См"

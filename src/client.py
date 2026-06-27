@@ -21,7 +21,6 @@ from src.converter import (
     collect_image_srcs,
     docmost_to_habr_doc,
     make_preview_doc,
-    preview_text,
     serialize_source,
 )
 from src.gdoc_converter import gdoc_to_docmost_doc
@@ -72,22 +71,34 @@ _CSRF_PROBE_URL = "https://habr.com/ru/feed/"
 # characters with HTTP 422 ("Аннотация не может быть короче 100 символов …").
 _MIN_PREVIEW_CHARS = 100
 
+# Upper bound for the announce. ``make_preview_doc`` already hard-caps the stored
+# text at this length on a word boundary, but we reject an over-long announce up
+# front so the caller gets a clear error instead of a silently truncated teaser.
+_MAX_PREVIEW_CHARS = 3000
+
 
 class HabrApiError(Exception):
     """Raised for any Habr API failure (HTTP error dict, bad body, transport)."""
 
 
 def _validate_announce_length(text: str) -> None:
-    """Raise ``HabrApiError`` if the derived announce is shorter than the minimum.
+    """Raise ``HabrApiError`` unless the announce is 100..3000 chars long.
 
-    Shared by ``create_draft`` and the ``update_draft`` preview-rebuild path so
-    both surface the same clear Russian message instead of a raw Habr 422.
+    The announce is a required, hand-written field (the «до ката» teaser); it is
+    never derived from the article body. Shared by ``create_draft`` and the
+    ``update_draft`` preview-update path so both surface the same clear Russian
+    message instead of a raw Habr 422.
     """
-    if len(text) < _MIN_PREVIEW_CHARS:
+    stripped = (text or "").strip()
+    if len(stripped) < _MIN_PREVIEW_CHARS:
         raise HabrApiError(
-            "Анонс (preview) получился короче 100 символов — Habr "
-            "отклонит. Передайте announce явно или увеличьте текст "
-            "статьи."
+            "Анонс (announce) обязателен и должен быть 100–3000 символов — "
+            "это отдельное поле «до ката», напишите текст-тизер."
+        )
+    if len(stripped) > _MAX_PREVIEW_CHARS:
+        raise HabrApiError(
+            "Анонс (announce) слишком длинный (более 3000 символов) — "
+            "это отдельное поле «до ката», сократите текст-тизер."
         )
 
 
@@ -384,7 +395,8 @@ class HabrClient:
         Validates the fields Habr requires on create (hubs/tags/flow non-empty,
         announce 100..3000 chars) locally and raises ``HabrApiError`` with a
         clear Russian message before any network call, so the LLM gets actionable
-        feedback instead of a raw 422.
+        feedback instead of a raw 422. The announce is a separate, required field
+        the caller writes — it is NEVER derived from the article body.
         """
         if not hubs:
             raise HabrApiError(
@@ -398,6 +410,16 @@ class HabrClient:
                 "Habr требует указать поток (flow). Список — через list_flows "
                 "(например '2' — backend)."
             )
+        # The announce is required and hand-written; validate it before any image
+        # / conversion work so a missing teaser fails fast and cheaply.
+        if not preview_doc:
+            if not (announce and announce.strip()):
+                raise HabrApiError(
+                    "Анонс (announce) обязателен и должен быть 100–3000 "
+                    "символов — это отдельное поле «до ката», напишите "
+                    "текст-тизер."
+                )
+            _validate_announce_length(announce)
 
         image_map, warnings = await self._reupload_images(docmost_doc)
         habr_doc = docmost_to_habr_doc(docmost_doc, image_map, warnings)
@@ -405,8 +427,7 @@ class HabrClient:
         if preview_doc:
             preview = serialize_source(preview_doc)
         else:
-            _validate_announce_length(preview_text(habr_doc, announce))
-            preview = serialize_source(make_preview_doc(habr_doc, announce))
+            preview = serialize_source(make_preview_doc(announce))
         form: dict[str, Any] = {
             "lang": lang or self._settings.habr_lang,
             "type": article_type,
@@ -533,10 +554,8 @@ class HabrClient:
         if fmt is not None:
             form["format"] = fmt
 
-        # Convert the body only when a new doc is supplied; keep a handle to it so
-        # the announce can be derived from it below when no explicit announce/
-        # preview_doc is given.
-        habr_doc: dict | None = None
+        # Convert the body only when a new doc is supplied. The announce is a
+        # separate field: changing the body alone never touches the preview.
         if docmost_doc is not None:
             image_map, warnings = await self._reupload_images(docmost_doc)
             habr_doc = docmost_to_habr_doc(docmost_doc, image_map, warnings)
@@ -546,24 +565,22 @@ class HabrClient:
                 "isMarkdown": False,
             }
 
-        # Rebuild the preview when the body changed OR an announce/preview_doc was
-        # given. An explicit preview_doc wins; otherwise build from the announce
-        # (or, when only the body changed, from the new body text).
+        # Update the preview ONLY when the caller supplies a new announce (or an
+        # explicit preview_doc). When neither is given the existing preview from
+        # the fetched form is kept verbatim — even if the body changed.
         if preview_doc is not None:
             form["preview"] = {
                 "source": serialize_source(preview_doc),
                 "editorVersion": 2,
                 "isMarkdown": False,
             }
-        elif docmost_doc is not None or announce is not None:
-            # ``preview_text`` ignores the doc when announce is set, so an empty
-            # doc is a safe stand-in for the announce-only path. Validate the
-            # derived announce length here too (symmetric with create_draft) so a
-            # too-short rebuild raises a clear error instead of a raw Habr 422.
-            base_doc = habr_doc if habr_doc is not None else {"type": "doc", "content": []}
-            _validate_announce_length(preview_text(base_doc, announce))
+        elif announce is not None:
+            # The announce is hand-written; validate its length (symmetric with
+            # create_draft) so a too-short/too-long value raises a clear error
+            # instead of a raw Habr 422.
+            _validate_announce_length(announce)
             form["preview"] = {
-                "source": serialize_source(make_preview_doc(base_doc, announce)),
+                "source": serialize_source(make_preview_doc(announce)),
                 "editorVersion": 2,
                 "isMarkdown": False,
             }

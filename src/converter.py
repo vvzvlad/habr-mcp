@@ -11,8 +11,8 @@ upload, save, etc.) lives elsewhere and calls these functions:
 - ``collect_image_srcs``     -> which images need uploading to habrastorage,
 - ``docmost_to_habr_doc``    -> the actual tree translation (src rewritten),
 - ``serialize_source``       -> compact JSON string for ``postForm.text.source``,
-- ``preview_text``           -> plain-text announce derived from the body,
-- ``make_preview_doc``       -> a minimal non-empty announce ("preview") doc.
+- ``make_preview_doc``       -> the announce ("preview") doc from caller-supplied
+  text (a separate field — never derived from the article body).
 
 Handled Docmost node families (everything else degrades gracefully):
 - block: ``paragraph``, ``heading``, ``codeBlock``, ``horizontalRule``,
@@ -47,11 +47,6 @@ _MAX_HEADING_LEVEL = 3
 # lower bound is enforced by the caller (client.create_draft), which can raise a
 # clear error instead of silently padding.
 _PREVIEW_MAX_CHARS = 3000
-
-# Target length for an auto-generated announce: accumulate leading paragraph
-# prose until at least this many characters are collected, then stop. This keeps
-# the teaser to roughly the first paragraph (or first couple of short ones).
-_PREVIEW_TARGET_CHARS = 220
 
 # Docmost mark type -> Habr mark type. Marks not listed here are either dropped
 # silently (highlight/textStyle/comment) or dropped with a warning (anything
@@ -767,27 +762,6 @@ def _collect_plain_text(node: Any) -> str:
     return "".join(parts)
 
 
-def _collect_preview_text(node: Any) -> str:
-    """Concatenate descendant text of ``node`` for the auto-announce.
-
-    Like ``_collect_plain_text`` but also picks up a Habr ``code_block`` node's
-    ``attrs.code`` string (code blocks store their source there, not as child
-    ``text`` nodes), so a body made entirely of code still yields a non-empty
-    announce. Kept separate from ``_collect_plain_text`` so spoiler/details title
-    extraction semantics are unchanged.
-    """
-    if not isinstance(node, dict):
-        return ""
-    if node.get("type") == "text":
-        return node.get("text", "") or ""
-    if node.get("type") == "code_block":
-        return (node.get("attrs") or {}).get("code", "") or ""
-    parts: list[str] = []
-    for child in node.get("content") or []:
-        parts.append(_collect_preview_text(child))
-    return "".join(parts)
-
-
 # --- Public API: full document conversion ------------------------------------
 
 
@@ -825,57 +799,14 @@ def serialize_source(habr_doc: dict) -> str:
 # --- Public API: preview / announce ------------------------------------------
 
 
-def preview_text(habr_doc: dict, announce: str | None = None) -> str:
-    """Derive the announce ("preview") plain text for a Habr post.
+def make_preview_doc(announce: str) -> dict:
+    """Build the Habr preview (announce, «до ката») doc from caller-supplied text.
 
-    If ``announce`` is given, its stripped value is used. Otherwise the announce
-    is built as a clean lead-paragraph teaser: only the FIRST body ``paragraph``
-    blocks contribute, in document order, accumulating their collapsed text until
-    at least ``_PREVIEW_TARGET_CHARS`` characters are gathered. Every non-paragraph
-    block (heading, table_wrapper, code_block, lists, blockquote, spoiler, hr, …)
-    is skipped so heading titles, table cells and code never leak into the teaser.
-    As a fallback — when the body has no paragraph prose at all (e.g. only code
-    blocks or tables) — the plain text of ALL blocks is concatenated instead so
-    such docs still get a non-empty announce. The result is hard-capped at
-    ``_PREVIEW_MAX_CHARS`` (3000), trimmed on a word boundary when possible.
-
-    Habr requires the rendered announce to be 100..3000 chars; this function
-    enforces only the upper bound (never pads). The lower bound is the caller's
-    responsibility so it can raise a clear error instead of silently padding.
+    The announce is a separate field written by the caller — never derived from
+    the body. Strips, hard-caps at _PREVIEW_MAX_CHARS (word boundary), wraps in
+    one inline paragraph (the postLead zone allows inline content only).
     """
-    if announce is not None:
-        text = announce.strip()
-    else:
-        # Lead-paragraph teaser: walk the body in order and collect text from
-        # ``paragraph`` blocks ONLY, skipping every other block type. Within a
-        # paragraph, collapse whitespace (hardBreak newlines) to single spaces.
-        # Stop once the running length reaches the target so the teaser stays
-        # close to the first paragraph (or first couple of short paragraphs).
-        para_texts: list[str] = []
-        running = 0
-        for block in habr_doc.get("content") or []:
-            if not isinstance(block, dict) or block.get("type") != "paragraph":
-                continue
-            collapsed = " ".join(_collect_plain_text(block).split())
-            if not collapsed:
-                continue
-            para_texts.append(collapsed)
-            running += len(collapsed)
-            if running >= _PREVIEW_TARGET_CHARS:
-                break
-        if para_texts:
-            text = " ".join(para_texts)
-        else:
-            # Fallback for paragraph-less bodies (code-only / table-only docs):
-            # concatenate every block's text so the announce is still non-empty.
-            # Use the preview collector so code_block source text contributes too.
-            block_texts: list[str] = []
-            for block in habr_doc.get("content") or []:
-                collapsed = " ".join(_collect_preview_text(block).split())
-                if collapsed:
-                    block_texts.append(collapsed)
-            text = " ".join(block_texts)
-
+    text = (announce or "").strip()
     if len(text) > _PREVIEW_MAX_CHARS:
         capped = text[:_PREVIEW_MAX_CHARS].rstrip()
         space = capped.rfind(" ")
@@ -885,17 +816,6 @@ def preview_text(habr_doc: dict, announce: str | None = None) -> str:
         if space > _PREVIEW_MAX_CHARS // 2:
             capped = capped[:space].rstrip()
         text = capped
-    return text
-
-
-def make_preview_doc(habr_doc: dict, announce: str | None = None) -> dict:
-    """Build a Habr 'preview' (announce) doc as a single inline paragraph.
-
-    The preview zone allows only inline content, so we emit exactly one
-    paragraph whose text comes from ``preview_text(habr_doc, announce)``. If the
-    text is empty we still emit one paragraph (the caller validates length).
-    """
-    text = preview_text(habr_doc, announce)
     return {
         "type": "doc",
         "content": [

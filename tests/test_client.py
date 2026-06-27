@@ -329,7 +329,9 @@ async def test_create_draft_hits_save_no_id(author_settings, docmost_doc):
     route = respx.post(f"{BASE_URL}publication/save").mock(
         return_value=httpx.Response(200, json={"post": "555", "ok": True})
     )
-    announce = "А" * 120  # >= 100 chars so the announce passes validation
+    # A distinctive teaser >= 100 chars; it must land in the preview verbatim and
+    # the body text ("Привет, Хабр.") must NOT leak into the preview.
+    announce = "Это рукописный анонс до ката для проверки. " + "тизер " * 20
     client = HabrClient(author_settings)
     try:
         result = await client.create_draft(
@@ -360,10 +362,12 @@ async def test_create_draft_hits_save_no_id(author_settings, docmost_doc):
     assert isinstance(source, str) and source
     assert "Привет, Хабр." in source
     assert "list_item" not in source
-    # preview (announce) rendered text is at least 100 chars.
+    # preview (announce) rendered text is EXACTLY the caller's announce (stripped),
+    # never derived from / mixed with the article body.
     preview_source = json_module.loads(body["preview"]["source"])
     preview_render = preview_source["content"][0]["content"][0]["text"]
-    assert len(preview_render) >= 100
+    assert preview_render == announce.strip()
+    assert "Привет, Хабр." not in preview_render
     # Author headers must be present.
     assert request.headers["csrf-token"] == "CSRF456"
     assert request.headers["habr-user-uuid"] == "uuid-1"
@@ -584,9 +588,9 @@ async def test_create_draft_requires_flow(author_settings, docmost_doc):
 
 
 @respx.mock
-async def test_create_draft_short_announce_raises(author_settings, docmost_doc):
-    # The fixture body ("Привет, Хабр.") renders to < 100 chars, so the derived
-    # announce is too short and create must raise before any save.
+async def test_create_draft_missing_announce_raises(author_settings, docmost_doc):
+    # The announce is a separate, required hand-written field — never derived from
+    # the body. Omitting it must raise before any save request goes out.
     save_route = respx.post(f"{BASE_URL}publication/save").mock(
         return_value=httpx.Response(200, json={"post": "1", "ok": True})
     )
@@ -598,7 +602,43 @@ async def test_create_draft_short_announce_raises(author_settings, docmost_doc):
             )
     finally:
         await client.aclose()
-    assert "100 символов" in str(exc.value)
+    assert "announce" in str(exc.value)
+    assert not save_route.called
+
+
+@respx.mock
+async def test_create_draft_blank_announce_raises(author_settings, docmost_doc):
+    # A whitespace-only announce is treated as missing.
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t", docmost_doc, hubs=["1"], tags=["t1"], flow="2", announce="   "
+            )
+    finally:
+        await client.aclose()
+    assert "announce" in str(exc.value)
+    assert not save_route.called
+
+
+@respx.mock
+async def test_create_draft_short_announce_raises(author_settings, docmost_doc):
+    # A present-but-too-short announce (< 100 chars) must also raise before save.
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t", docmost_doc, hubs=["1"], tags=["t1"], flow="2", announce="коротко"
+            )
+    finally:
+        await client.aclose()
+    assert "100" in str(exc.value)
     assert not save_route.called
 
 
@@ -627,6 +667,52 @@ async def test_update_draft_announce_override(author_settings, post_data_payload
 
 
 @respx.mock
+async def test_update_draft_body_without_announce_keeps_existing_preview(
+    author_settings, post_data_payload, docmost_doc
+):
+    import json as json_module
+
+    # The announce is a separate field: updating only the body must leave the
+    # existing preview from the fetched post-data untouched.
+    existing_preview_source = (
+        '{"type":"doc","content":[{"type":"paragraph",'
+        '"attrs":{"simple":false,"persona":false},'
+        '"content":[{"type":"text","text":"СТАРЫЙ АНОНС"}]}]}'
+    )
+    payload = {
+        "postForm": {
+            **post_data_payload["postForm"],
+            "preview": {
+                "source": existing_preview_source,
+                "editorVersion": "2",
+                "isMarkdown": False,
+            },
+        }
+    }
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.update_draft(42, docmost_doc=docmost_doc)
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(save_route.calls.last.request.content)
+    # The body (text) was updated...
+    assert "Привет, Хабр." in body["text"]["source"]
+    # ...but the preview source is the EXISTING one, unchanged.
+    assert json_module.loads(body["preview"]["source"]) == json_module.loads(
+        existing_preview_source
+    )
+    preview_render = json_module.loads(body["preview"]["source"])
+    assert preview_render["content"][0]["content"][0]["text"] == "СТАРЫЙ АНОНС"
+
+
+@respx.mock
 async def test_update_draft_short_announce_raises_no_save(
     author_settings, post_data_payload
 ):
@@ -645,7 +731,8 @@ async def test_update_draft_short_announce_raises_no_save(
             await client.update_draft(42, announce="слишком коротко")
     finally:
         await client.aclose()
-    assert "100 символов" in str(exc.value)
+    assert "100" in str(exc.value)
+    assert "announce" in str(exc.value)
     assert not save_route.called
 
 
