@@ -44,6 +44,12 @@ async def test_tools_are_registered(auth_settings):
         "vote_article",
         "vote_comment",
         "bookmark_article",
+        "create_draft",
+        "get_draft",
+        "update_draft",
+        "delete_draft",
+        "resolve_hubs",
+        "list_flows",
     }
 
 
@@ -112,6 +118,65 @@ async def test_vote_article_tool_with_creds(auth_settings):
     )
     out = _text(result)
     assert "Голос за статью учтён" in out
+
+
+@respx.mock
+async def test_resolve_hubs_tool_maps_aliases(author_settings):
+    catalog = {
+        "collective": [{"id": "23108", "alias": "smol", "title": "$mol *"}],
+        "offtopic": [{"id": "19259", "alias": "closet", "title": "Closet"}],
+        "corporative": [],
+        "byPost": [{"id": "161", "alias": "habr", "title": "Habr"}],
+    }
+    respx.get(f"{BASE_URL}publication/suggest-hubs").mock(
+        return_value=httpx.Response(200, json=catalog)
+    )
+    server = build_server(author_settings)
+    result = await server.call_tool(
+        "resolve_hubs", {"aliases": ["habr", "smol", "ghost"]}
+    )
+    out = _text(result)
+    assert "habr → 161 (Habr)" in out
+    assert "smol → 23108 ($mol *)" in out
+    assert "ghost → не найден" in out
+
+
+@respx.mock
+async def test_create_draft_tool_reports_id(author_settings, docmost_doc):
+    import json as json_module
+
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"id": "777"})
+    )
+    server = build_server(author_settings)
+    result = await server.call_tool(
+        "create_draft",
+        {"title": "T", "doc": json_module.dumps(docmost_doc)},
+    )
+    out = _text(result)
+    assert "id=777" in out
+
+
+async def test_create_draft_tool_rejects_bad_json(author_settings):
+    server = build_server(author_settings)
+    result = await server.call_tool(
+        "create_draft", {"title": "T", "doc": "{not json"}
+    )
+    out = _text(result)
+    assert "Не удалось разобрать doc" in out
+
+
+async def test_author_tool_without_creds_returns_message(anon_settings, docmost_doc):
+    import json as json_module
+
+    server = build_server(anon_settings)
+    result = await server.call_tool(
+        "create_draft",
+        {"title": "T", "doc": json_module.dumps(docmost_doc)},
+    )
+    out = _text(result)
+    assert "HABR_COOKIE" in out
+    assert "HABR_CSRF_TOKEN" in out
 
 
 async def test_lifespan_closes_http_client(auth_settings, monkeypatch):

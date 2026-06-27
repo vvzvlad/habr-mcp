@@ -198,6 +198,49 @@ def _render_comment(
         _render_comment(child_id, comments, out, counter, limit, seen)
 
 
+def format_draft(payload: dict[str, Any]) -> str:
+    """Render a draft (``post-data`` response) as a compact Russian summary.
+
+    Appends the RAW serialized ``text`` and ``preview`` sources so an LLM can
+    round-trip them. All ``.get`` chains are guarded against missing/None.
+    """
+    form = payload.get("postForm") or payload
+    if not isinstance(form, dict):
+        form = {}
+
+    def _list(value: Any) -> str:
+        if isinstance(value, list) and value:
+            return ", ".join(str(item) for item in value)
+        return "—"
+
+    meta = [
+        f"id: {form.get('id', '?')}",
+        f"заголовок: {form.get('title') or '(без заголовка)'}",
+        f"статус: {form.get('status') or '—'}",
+        f"язык: {form.get('lang') or '—'}",
+        f"тип: {form.get('type') or '—'}",
+        f"поток (flow): {form.get('flow') or '—'}",
+        f"формат: {form.get('format') or '—'}",
+        f"сложность: {form.get('complexity') or '—'}",
+        f"хабы: {_list(form.get('hubs'))}",
+        f"теги: {_list(form.get('tags'))}",
+        f"опубликовано: {form.get('publishedAt') or '—'}",
+    ]
+
+    text_block = form.get("text") if isinstance(form.get("text"), dict) else {}
+    preview_block = form.get("preview") if isinstance(form.get("preview"), dict) else {}
+    text_source = text_block.get("source") or ""
+    preview_source = preview_block.get("source") or ""
+
+    return (
+        "\n".join(meta)
+        + "\n\n--- TEXT (ProseMirror source) ---\n"
+        + text_source
+        + "\n\n--- PREVIEW (ProseMirror source) ---\n"
+        + preview_source
+    )
+
+
 def format_comments(payload: dict[str, Any], limit: int) -> str:
     """Render the comment tree from ``threads`` order, indented by level."""
     comments = payload.get("comments") or {}

@@ -30,6 +30,11 @@ python3 -m venv .venv
 | `HABR_CONNECT_SID` | Значение cookie `connect.sid` (для записи) | пусто |
 | `HABR_CSRF_TOKEN` | CSRF-токен (для записи) | пусто |
 | `HABR_CSRF_COOKIE_NAME` | Имя CSRF-cookie (double-submit) | `csrf_token` |
+| `HABR_COOKIE` | Полный Cookie-заголовок браузера для авторских инструментов (черновики) | пусто |
+| `HABR_USER_UUID` | Значение заголовка `habr-user-uuid` | пусто |
+| `HABR_X_APP_VERSION` | Значение заголовка `x-app-version` | `2.325.7` |
+| `DOCMOST_BASE_URL` | База для скачивания картинок Docmost (перезалив) | пусто |
+| `DOCMOST_API_TOKEN` | Bearer-токен для скачивания вложений Docmost | пусто |
 | `PROXY` | HTTP/SOCKS прокси для httpx | пусто |
 | `REQUEST_TIMEOUT` | Таймаут запроса, сек | `20` |
 | `PER_PAGE` | Размер страницы лент/поиска | `20` |
@@ -95,6 +100,24 @@ python3 -m venv .venv
 | `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Голос за статью |
 | `vote_comment` | `comment_id: int`, `direction: str` | Голос за комментарий (ЭКСПЕРИМЕНТАЛЬНО) |
 | `bookmark_article` | `article_id: int`, `add: bool = True` | Закладка (удаление ЭКСПЕРИМЕНТАЛЬНО) |
+
+Авторский слой — черновики (требует авторской сессии: `HABR_COOKIE` + `HABR_CSRF_TOKEN`):
+
+| Инструмент | Параметры | Что делает |
+| --- | --- | --- |
+| `create_draft` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Создать черновик из страницы Docmost (`doc` = ProseMirror-JSON из `get_page_json`) |
+| `get_draft` | `post_id: int` | Прочитать черновик (сводка + сырые ProseMirror-исходники) |
+| `update_draft` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Обновить поля черновика (read-modify-write автосейв) |
+| `delete_draft` | `post_id: int` | Удалить черновик |
+| `resolve_hubs` | `aliases: list[str]`, `post_id: int \| None` | Алиасы хабов → числовые id |
+| `list_flows` | `publication_id: int \| None` | Список потоков (id / alias / title) |
+
+Авторские инструменты публикуют страницы Docmost в **черновики** Хабра. Тело статьи
+конвертируется из ProseMirror Docmost в дерево Habr editorVersion-2; картинки
+скачиваются из Docmost (`DOCMOST_BASE_URL` + `DOCMOST_API_TOKEN`) и перезаливаются
+на habrastorage (сбой картинки не прерывает публикацию — текст уходит, картинка
+выбрасывается с предупреждением). Перевод черновика в публичный статус
+(«Опубликовать») **не реализован** — пробел протокола (`docs/habr-publication-protocol.md` §8).
 
 ## Про write-эндпоинты (reverse-engineering)
 

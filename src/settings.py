@@ -29,6 +29,18 @@ class Settings(BaseSettings):
     habr_csrf_token: str | None = None
     # Name of the CSRF cookie that must echo the token (double-submit cookie).
     habr_csrf_cookie_name: str = "csrf_token"
+    # FULL Cookie header string for author endpoints (publication/…). Protocol §2
+    # says a single connect.sid is not enough — the session is held by the bundle
+    # connect_sid + hsec_id + habrsession_id + …, so store the whole Cookie header.
+    habr_cookie: str | None = None
+    # Value for the `habr-user-uuid` request header (mirrors the habr_uuid cookie).
+    habr_user_uuid: str | None = None
+    # Value for the `x-app-version` request header (Habr frontend version).
+    habr_x_app_version: str = "2.325.7"
+    # Base URL to resolve & download Docmost image attachments (image reupload only).
+    docmost_base_url: str | None = None
+    # Bearer token to download Docmost attachments (image reupload only).
+    docmost_api_token: str | None = None
     # httpx request timeout in seconds.
     request_timeout: float = 20.0
     # Optional HTTP/SOCKS proxy URL passed straight to httpx.

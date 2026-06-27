@@ -35,6 +35,63 @@ def auth_settings() -> Settings:
 
 
 @pytest.fixture
+def author_settings() -> Settings:
+    """Settings with dummy author (draft) credentials."""
+    return Settings(
+        habr_lang="ru",
+        habr_cookie="connect_sid=s%3Aabc; hsec_id=def; habrsession_id=ghi",
+        habr_csrf_token="CSRF456",
+        habr_user_uuid="uuid-1",
+        proxy=None,
+        per_page=20,
+    )
+
+
+@pytest.fixture
+def docmost_doc() -> dict:
+    """A tiny image-free Docmost ProseMirror doc with one paragraph."""
+    return {
+        "type": "doc",
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": "Привет, Хабр."}],
+            }
+        ],
+    }
+
+
+@pytest.fixture
+def post_data_payload() -> dict:
+    """A ``post-data`` response with read-side types (hubs ints, editorVersion str)."""
+    return {
+        "postForm": {
+            "id": "1047360",
+            "lang": "ru",
+            "type": "simple",
+            "status": "drafted",
+            "title": "Старый заголовок",
+            "hubs": [19791, 4992],
+            "tags": ["t1"],
+            "flow": "2",
+            "format": "common",
+            "complexity": None,
+            "publishedAt": None,
+            "text": {
+                "source": '{"type":"doc","content":[]}',
+                "editorVersion": "2",
+                "isMarkdown": False,
+            },
+            "preview": {
+                "source": '{"type":"doc","content":[]}',
+                "editorVersion": "2",
+                "isMarkdown": False,
+            },
+        }
+    }
+
+
+@pytest.fixture
 def feed_payload() -> dict:
     """Two-article feed payload; publicationIds order is intentionally reversed."""
     return {

@@ -6,7 +6,12 @@ import httpx
 import pytest
 import respx
 
-from src.client import MISSING_CREDS_MESSAGE, HabrApiError, HabrClient
+from src.client import (
+    AUTHOR_MISSING_CREDS_MESSAGE,
+    MISSING_CREDS_MESSAGE,
+    HabrApiError,
+    HabrClient,
+)
 
 BASE_URL = "https://habr.com/kek/v2/"
 
@@ -266,3 +271,211 @@ async def test_empty_2xx_body_is_success(auth_settings):
     finally:
         await client.aclose()
     assert result == {}
+
+
+# -- author layer: drafts ----------------------------------------------------
+
+
+def test_author_headers_without_creds_raises(anon_settings):
+    client = HabrClient(anon_settings)
+    with pytest.raises(HabrApiError) as exc:
+        client._author_headers()
+    assert str(exc.value) == AUTHOR_MISSING_CREDS_MESSAGE
+
+
+def test_author_headers_have_full_bundle(author_settings):
+    client = HabrClient(author_settings)
+    headers = client._author_headers(referer="https://habr.com/ru/articles/new/")
+    assert headers["csrf-token"] == "CSRF456"
+    assert headers["habr-user-uuid"] == "uuid-1"
+    assert headers["x-app-version"] == "2.325.7"
+    assert headers["Cookie"].startswith("connect_sid=")
+    assert headers["referer"] == "https://habr.com/ru/articles/new/"
+
+
+@respx.mock
+async def test_create_draft_hits_save_no_id(author_settings, docmost_doc):
+    import json as json_module
+
+    route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"id": "555"})
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.create_draft(
+            "Заголовок", docmost_doc, hubs=[19791, 4992], tags=["t1"], flow=2
+        )
+    finally:
+        await client.aclose()
+
+    request = route.calls.last.request
+    assert request.url.path == "/kek/v2/publication/save"
+    body = json_module.loads(request.content)
+    assert body["status"] == "drafted"
+    assert body["idempotenceKey"]
+    assert body["hubs"] == ["19791", "4992"]
+    assert all(isinstance(h, str) for h in body["hubs"])
+    assert body["text"]["editorVersion"] == 2
+    assert body["flow"] == "2"
+    # text.source is a non-empty JSON string carrying the converted paragraph.
+    source = body["text"]["source"]
+    assert isinstance(source, str) and source
+    assert "Привет, Хабр." in source
+    # Author headers must be present.
+    assert request.headers["csrf-token"] == "CSRF456"
+    assert request.headers["habr-user-uuid"] == "uuid-1"
+    assert request.headers["x-app-version"] == "2.325.7"
+    assert result["warnings"] == []
+    assert result["response"] == {"id": "555"}
+
+
+@respx.mock
+async def test_get_draft_hits_post_data(author_settings, post_data_payload):
+    route = respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    client = HabrClient(author_settings)
+    try:
+        data = await client.get_draft(42)
+    finally:
+        await client.aclose()
+    assert route.calls.last.request.url.path == "/kek/v2/publication/post-data/42"
+    assert data["postForm"]["id"] == "1047360"
+
+
+@respx.mock
+async def test_update_draft_coerces_types(author_settings, post_data_payload):
+    import json as json_module
+
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.update_draft(42, title="Новый")
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(save_route.calls.last.request.content)
+    assert body["title"] == "Новый"
+    # hubs came back as ints from post-data; must be coerced to strings.
+    assert body["hubs"] == ["19791", "4992"]
+    # editorVersion came back as "2" string; must be coerced to int 2.
+    assert body["text"]["editorVersion"] == 2
+    assert body["preview"]["editorVersion"] == 2
+
+
+@respx.mock
+async def test_update_draft_refuses_published_post_no_save(
+    author_settings, post_data_payload
+):
+    # A published post must be rejected before any save request goes out, so a
+    # stray update never overwrites the live article.
+    published = {"postForm": {**post_data_payload["postForm"], "status": "published"}}
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=published)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.update_draft(42, title="Новый")
+    finally:
+        await client.aclose()
+    message = str(exc.value)
+    assert "published" in message
+    assert "не черновик" in message
+    assert "опубликованную статью" in message
+    # The save endpoint was never called.
+    assert not save_route.called
+
+
+@respx.mock
+async def test_update_draft_allows_drafted_status_and_saves(
+    author_settings, post_data_payload
+):
+    # The default fixture status is "drafted"; the save must proceed normally.
+    assert post_data_payload["postForm"]["status"] == "drafted"
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.update_draft(42, title="Новый")
+    finally:
+        await client.aclose()
+    assert save_route.called
+
+
+@respx.mock
+async def test_delete_draft_uses_delete(author_settings):
+    route = respx.delete(f"{BASE_URL}articles/drafts/42/posts").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.delete_draft(42)
+    finally:
+        await client.aclose()
+    assert route.called
+    assert route.calls.last.request.method == "DELETE"
+
+
+@respx.mock
+async def test_suggest_hubs_sends_params(author_settings):
+    route = respx.get(f"{BASE_URL}publication/suggest-hubs").mock(
+        return_value=httpx.Response(200, json={"collective": []})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.suggest_hubs(post_id=99)
+    finally:
+        await client.aclose()
+    params = route.calls.last.request.url.params
+    assert params["publicationType"] == "topic"
+    assert params["postType"] == "simple"
+    assert params["postContext"] == "topic"
+    assert params["post"] == "99"
+
+
+@respx.mock
+async def test_list_flows_sends_publication_id(author_settings):
+    route = respx.get(f"{BASE_URL}refs/flows/wysiwyg").mock(
+        return_value=httpx.Response(200, json={"flows": []})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.list_flows(publication_id=7)
+    finally:
+        await client.aclose()
+    params = route.calls.last.request.url.params
+    assert params["publicationId"] == "7"
+
+
+@respx.mock
+async def test_create_draft_no_images_no_extra_http(author_settings, docmost_doc):
+    # An image-free doc must not trigger any download/upload HTTP at all.
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"id": "1"})
+    )
+    upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        mapping, warnings = await client._reupload_images(docmost_doc)
+        await client.create_draft("t", docmost_doc)
+    finally:
+        await client.aclose()
+    assert mapping == {}
+    assert warnings == []
+    assert not upload_route.called
+    assert save_route.called
