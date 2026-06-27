@@ -594,6 +594,10 @@ class HabrClient:
             if isinstance(block, dict):
                 block["editorVersion"] = 2
 
+        # Habr rejects a repeated save with the same/absent idempotency key
+        # (REQUEST_ALREADY_PROCESSED); send a fresh one per save like the editor does.
+        form["idempotenceKey"] = self._nanoid()
+
         result = await self._post(
             f"publication/save/{post_id}",
             json=form,

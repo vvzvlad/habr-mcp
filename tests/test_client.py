@@ -416,6 +416,37 @@ async def test_update_draft_coerces_types(author_settings, post_data_payload):
 
 
 @respx.mock
+async def test_update_draft_sends_fresh_idempotence_key(
+    author_settings, post_data_payload
+):
+    import json as json_module
+
+    # post-data does NOT carry an idempotenceKey; save/<id> rejects a repeated
+    # save with the same/absent key (REQUEST_ALREADY_PROCESSED). update_draft must
+    # set a fresh key per save, and successive saves must use DIFFERENT keys.
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.update_draft(42, title="Первый")
+        first = json_module.loads(save_route.calls[0].request.content)
+        await client.update_draft(42, title="Второй")
+        second = json_module.loads(save_route.calls[1].request.content)
+    finally:
+        await client.aclose()
+
+    # Each save carries a non-empty string idempotenceKey...
+    assert isinstance(first["idempotenceKey"], str) and first["idempotenceKey"]
+    assert isinstance(second["idempotenceKey"], str) and second["idempotenceKey"]
+    # ...and the key is regenerated per save (never reused).
+    assert first["idempotenceKey"] != second["idempotenceKey"]
+
+
+@respx.mock
 async def test_update_draft_refuses_published_post_no_save(
     author_settings, post_data_payload
 ):
