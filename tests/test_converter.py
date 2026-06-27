@@ -8,6 +8,7 @@ from src.converter import (
     collect_image_srcs,
     docmost_to_habr_doc,
     make_preview_doc,
+    preview_text,
     serialize_source,
 )
 
@@ -38,10 +39,12 @@ def test_paragraph_attrs_simple_persona_align():
     assert para["content"] == [{"type": "text", "text": "hi"}]
 
 
-def test_paragraph_align_defaults_to_none():
+def test_paragraph_omits_align_when_null():
+    # Habr's canonical paragraph has NO align key when alignment is null.
     src = _doc({"type": "paragraph", "content": [_text("hi")]})
     para = docmost_to_habr_doc(src)["content"][0]
-    assert para["attrs"]["align"] is None
+    assert para["attrs"] == {"simple": False, "persona": False}
+    assert "align" not in para["attrs"]
 
 
 def test_empty_trailing_paragraph_omits_content():
@@ -110,8 +113,12 @@ def test_bullet_list_and_list_item():
     )
     out = docmost_to_habr_doc(src)["content"][0]
     assert out["type"] == "unordered_list"
+    # Top-level list carries attrs.type "outer".
+    assert out["attrs"] == {"type": "outer"}
     item = out["content"][0]
-    assert item["type"] == "list_item"
+    # Habr's item node is "listitem" (one word), with NO attrs.
+    assert item["type"] == "listitem"
+    assert "attrs" not in item
     assert item["content"][0]["type"] == "paragraph"
 
 
@@ -126,7 +133,69 @@ def test_ordered_list():
     )
     out = docmost_to_habr_doc(src)["content"][0]
     assert out["type"] == "ordered_list"
-    assert out["content"][0]["type"] == "list_item"
+    assert out["attrs"] == {"type": "outer"}
+    assert out["content"][0]["type"] == "listitem"
+
+
+def test_list_emits_listitem_never_snake_case_in_source():
+    # The serialized text.source must use "listitem", never "list_item".
+    src = _doc(
+        {
+            "type": "bulletList",
+            "content": [
+                {
+                    "type": "listItem",
+                    "content": [{"type": "paragraph", "content": [_text("x")]}],
+                }
+            ],
+        }
+    )
+    source = serialize_source(docmost_to_habr_doc(src))
+    assert "listitem" in source
+    assert "list_item" not in source
+
+
+def test_nested_list_inside_list_item_is_inner():
+    # A list directly inside a listitem is tagged attrs.type "inner"; the outer
+    # list stays "outer".
+    src = _doc(
+        {
+            "type": "bulletList",
+            "content": [
+                {
+                    "type": "listItem",
+                    "content": [
+                        {"type": "paragraph", "content": [_text("outer item")]},
+                        {
+                            "type": "bulletList",
+                            "content": [
+                                {
+                                    "type": "listItem",
+                                    "content": [
+                                        {
+                                            "type": "paragraph",
+                                            "content": [_text("nested")],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    warnings: list[str] = []
+    outer = docmost_to_habr_doc(src, warnings=warnings)["content"][0]
+    assert outer["type"] == "unordered_list"
+    assert outer["attrs"] == {"type": "outer"}
+    item = outer["content"][0]
+    assert item["type"] == "listitem"
+    inner_list = item["content"][1]
+    assert inner_list["type"] == "unordered_list"
+    assert inner_list["attrs"] == {"type": "inner"}
+    # A nested list is safe content inside a list item: no rejection warning.
+    assert not any("list item contains block content" in w for w in warnings)
 
 
 def test_list_item_with_code_block_preserves_content_and_warns():
@@ -153,7 +222,7 @@ def test_list_item_with_code_block_preserves_content_and_warns():
     warnings: list[str] = []
     out = docmost_to_habr_doc(src, warnings=warnings)["content"][0]
     item = out["content"][0]
-    assert item["type"] == "list_item"
+    assert item["type"] == "listitem"
     # Content preserved: paragraph + code_block both survive in order.
     inner_types = [block["type"] for block in item["content"]]
     assert inner_types == ["paragraph", "code_block"]
@@ -194,7 +263,7 @@ def test_task_list_degrades_with_single_warning():
     warnings: list[str] = []
     out = docmost_to_habr_doc(src, warnings=warnings)["content"][0]
     assert out["type"] == "unordered_list"
-    assert all(item["type"] == "list_item" for item in out["content"])
+    assert all(item["type"] == "listitem" for item in out["content"])
     # The "once" warning is recorded a single time despite two task items.
     task_warnings = [w for w in warnings if "task list" in w]
     assert len(task_warnings) == 1
@@ -522,33 +591,127 @@ def test_serialize_source_keeps_unicode():
     assert "привет" in s  # ensure_ascii=False
 
 
-# --- make_preview_doc --------------------------------------------------------
+# --- preview_text ------------------------------------------------------------
 
 
-def test_make_preview_doc_single_nonempty_paragraph():
+def test_preview_text_concatenates_all_body_text():
     habr = docmost_to_habr_doc(
         _doc(
             {"type": "heading", "attrs": {"level": 1}, "content": [_text("Заголовок")]},
-            {"type": "paragraph", "content": [_text("Тело")]},
+            {"type": "paragraph", "content": [_text("Первый абзац.")]},
+            {"type": "paragraph", "content": [_text("Второй абзац.")]},
         )
+    )
+    text = preview_text(habr)
+    # All body blocks contribute, joined by single spaces in document order.
+    assert text == "Заголовок Первый абзац. Второй абзац."
+
+
+def test_preview_text_collects_list_quote_and_spoiler_text():
+    habr = docmost_to_habr_doc(
+        _doc(
+            {
+                "type": "bulletList",
+                "content": [
+                    {
+                        "type": "listItem",
+                        "content": [{"type": "paragraph", "content": [_text("item")]}],
+                    }
+                ],
+            },
+            {
+                "type": "blockquote",
+                "content": [{"type": "paragraph", "content": [_text("quote")]}],
+            },
+            {
+                "type": "callout",
+                "attrs": {"type": "info"},
+                "content": [{"type": "paragraph", "content": [_text("note")]}],
+            },
+        )
+    )
+    text = preview_text(habr)
+    assert "item" in text
+    assert "quote" in text
+    assert "note" in text
+
+
+def test_preview_text_uses_explicit_announce():
+    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text("body")]}))
+    text = preview_text(habr, announce="  Явный анонс.  ")
+    assert text == "Явный анонс."
+
+
+def test_preview_text_caps_at_3000_on_word_boundary():
+    word = "слово "
+    long_text = word * 700  # ~4200 chars
+    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text(long_text)]}))
+    text = preview_text(habr)
+    assert len(text) <= 3000
+    # Trimmed on a word boundary: no trailing partial word / no dangling space.
+    assert not text.endswith(" ")
+    assert text.endswith("слово")
+
+
+def test_preview_text_does_not_pad_short_text():
+    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text("hi")]}))
+    assert preview_text(habr) == "hi"
+
+
+def test_preview_text_cap_keeps_most_when_only_early_space():
+    # A long string whose ONLY space is near the start must not collapse to a few
+    # chars: the early word boundary is ignored and the hard 3000-char cut wins.
+    text = "См " + "x" * 3500  # single space at index 2
+    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text(text)]}))
+    out = preview_text(habr)
+    assert len(out) <= 3000
+    assert len(out) >= 1500  # not collapsed to "См"
+
+
+def test_preview_text_collects_code_block_text():
+    # A doc whose only block is a code_block (code in attrs.code, no children)
+    # must still produce a non-empty announce containing that code text.
+    code = "def f():\n    return 42  # " + "a" * 100
+    habr = docmost_to_habr_doc(
+        _doc(
+            {
+                "type": "codeBlock",
+                "attrs": {"language": "python"},
+                "content": [_text(code)],
+            }
+        )
+    )
+    # The Habr code_block stores the source in attrs.code.
+    assert habr["content"][0]["type"] == "code_block"
+    assert len(habr["content"][0]["attrs"]["code"]) >= 100
+    out = preview_text(habr)
+    assert out  # non-empty
+    assert "return 42" in out
+
+
+# --- make_preview_doc --------------------------------------------------------
+
+
+def test_make_preview_doc_single_paragraph_no_align():
+    habr = docmost_to_habr_doc(
+        _doc({"type": "paragraph", "content": [_text("Тело статьи.")]})
     )
     preview = make_preview_doc(habr)
     assert preview["type"] == "doc"
     assert len(preview["content"]) == 1
     para = preview["content"][0]
     assert para["type"] == "paragraph"
-    # First heading text is used as the announce.
-    assert para["content"][0]["text"] == "Заголовок"
+    assert para["attrs"] == {"simple": False, "persona": False}
+    assert para["content"][0]["text"] == "Тело статьи."
 
 
-def test_make_preview_doc_falls_back_when_no_text():
-    habr = {"type": "doc", "content": []}
-    preview = make_preview_doc(habr)
-    assert preview["content"][0]["content"][0]["text"] == "Читать далее"
+def test_make_preview_doc_uses_announce():
+    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text("body")]}))
+    preview = make_preview_doc(habr, announce="Переопределённый анонс")
+    assert preview["content"][0]["content"][0]["text"] == "Переопределённый анонс"
 
 
-def test_make_preview_doc_trims_long_text():
-    long_text = "x" * 500
-    habr = docmost_to_habr_doc(_doc({"type": "paragraph", "content": [_text(long_text)]}))
-    preview = make_preview_doc(habr)
-    assert len(preview["content"][0]["content"][0]["text"]) <= 220
+def test_make_preview_doc_empty_doc_still_one_paragraph():
+    preview = make_preview_doc({"type": "doc", "content": []})
+    assert len(preview["content"]) == 1
+    assert preview["content"][0]["content"][0]["text"] == ""

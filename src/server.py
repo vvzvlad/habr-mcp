@@ -38,9 +38,13 @@ def _warnings_suffix(warnings: list[str] | None) -> str:
 
 
 def _draft_id(response: Any) -> str:
-    """Best-effort extraction of the new draft id from a save response."""
+    """Best-effort extraction of the new draft id from a save response.
+
+    The live create response is ``{"post":"<id>","ok":true}``, so ``post`` is
+    checked first; the others remain as fallbacks for older/other shapes.
+    """
     if isinstance(response, dict):
-        for key in ("id", "publicationId", "postId"):
+        for key in ("post", "id", "publicationId", "postId"):
             value = response.get(key)
             if value:
                 return str(value)
@@ -224,11 +228,14 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Создать черновик статьи на Habr из страницы Docmost (требует "
             "залогиненной авторской сессии: HABR_COOKIE и HABR_CSRF_TOKEN). "
             "Аргумент title — заголовок. Аргумент doc — ProseMirror-JSON документа "
-            "Docmost (как отдаёт get_page_json), строкой. Аргумент hubs — список "
-            "id или алиасов хабов (резолвьте алиасы через resolve_hubs). Аргумент "
-            "tags — список тегов. Аргумент flow — id потока (см. list_flows). "
-            "Аргумент format — формат поста (по умолчанию 'common'). Возвращает id "
-            "созданного черновика и предупреждения конвертации."
+            "Docmost (как отдаёт get_page_json), строкой. Habr ТРЕБУЕТ: hubs — "
+            "минимум один числовой id хаба (резолвьте алиасы через resolve_hubs); "
+            "tags — минимум один тег; flow — обязательный id потока (см. "
+            "list_flows). Аргумент announce — анонс «до ката», 100–3000 символов; "
+            "если не передан, берётся из текста статьи (если получится короче 100 "
+            "символов — будет ошибка). Аргумент format — формат поста (по "
+            "умолчанию 'common'). Возвращает id созданного черновика и "
+            "предупреждения конвертации."
         ),
     )
     async def create_draft(
@@ -237,6 +244,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         hubs: list[str] | None = None,
         tags: list[str] | None = None,
         flow: str | None = None,
+        announce: str | None = None,
         format: str = "common",
     ) -> str:
         try:
@@ -245,7 +253,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return f"Не удалось разобрать doc как JSON: {exc}"
         try:
             result = await client.create_draft(
-                title, parsed_doc, hubs=hubs, tags=tags, flow=flow, fmt=format
+                title,
+                parsed_doc,
+                hubs=hubs,
+                tags=tags,
+                flow=flow,
+                announce=announce,
+                fmt=format,
             )
         except HabrApiError as exc:
             return str(exc)
@@ -278,7 +292,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "post_id — id черновика. Все остальные аргументы необязательны и "
             "перезаписывают соответствующие поля: title, doc (ProseMirror-JSON "
             "страницы Docmost строкой, как get_page_json), hubs, tags, flow, "
-            "format. Возвращает результат и предупреждения конвертации."
+            "format. Аргумент announce — анонс «до ката» (100–3000 символов); "
+            "переопределяет анонс, который иначе берётся из текста статьи. "
+            "Возвращает результат и предупреждения конвертации."
         ),
     )
     async def update_draft(
@@ -288,6 +304,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         hubs: list[str] | None = None,
         tags: list[str] | None = None,
         flow: str | None = None,
+        announce: str | None = None,
         format: str | None = None,
     ) -> str:
         parsed_doc = None
@@ -304,6 +321,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 hubs=hubs,
                 tags=tags,
                 flow=flow,
+                announce=announce,
                 fmt=format,
             )
         except HabrApiError as exc:

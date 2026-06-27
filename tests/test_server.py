@@ -145,16 +145,35 @@ async def test_resolve_hubs_tool_maps_aliases(author_settings):
 async def test_create_draft_tool_reports_id(author_settings, docmost_doc):
     import json as json_module
 
+    # Live create response shape: {"post":"<id>","ok":true}.
     respx.post(f"{BASE_URL}publication/save").mock(
-        return_value=httpx.Response(200, json={"id": "777"})
+        return_value=httpx.Response(200, json={"post": "777", "ok": True})
     )
     server = build_server(author_settings)
     result = await server.call_tool(
         "create_draft",
-        {"title": "T", "doc": json_module.dumps(docmost_doc)},
+        {
+            "title": "T",
+            "doc": json_module.dumps(docmost_doc),
+            "hubs": ["161"],
+            "tags": ["t1"],
+            "flow": "2",
+            "announce": "А" * 120,
+        },
     )
     out = _text(result)
     assert "id=777" in out
+
+
+def test_draft_id_reads_post_key():
+    from src.server import _draft_id
+
+    # The live create response uses "post" for the new id.
+    assert _draft_id({"post": "123", "ok": True}) == "123"
+    # Fallback keys still work.
+    assert _draft_id({"id": "9"}) == "9"
+    assert _draft_id({"data": {"id": "5"}}) == "5"
+    assert _draft_id({"ok": True}) == "?"
 
 
 async def test_create_draft_tool_rejects_bad_json(author_settings):
@@ -169,10 +188,19 @@ async def test_create_draft_tool_rejects_bad_json(author_settings):
 async def test_author_tool_without_creds_returns_message(anon_settings, docmost_doc):
     import json as json_module
 
+    # Required fields are supplied so the creds check (not field validation) is
+    # what fires, returning the author-credentials message.
     server = build_server(anon_settings)
     result = await server.call_tool(
         "create_draft",
-        {"title": "T", "doc": json_module.dumps(docmost_doc)},
+        {
+            "title": "T",
+            "doc": json_module.dumps(docmost_doc),
+            "hubs": ["161"],
+            "tags": ["t1"],
+            "flow": "2",
+            "announce": "А" * 120,
+        },
     )
     out = _text(result)
     assert "HABR_COOKIE" in out

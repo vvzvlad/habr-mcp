@@ -32,7 +32,7 @@ python3 -m venv .venv
 | `HABR_CSRF_COOKIE_NAME` | Имя CSRF-cookie (double-submit) | `csrf_token` |
 | `HABR_COOKIE` | Полный Cookie-заголовок браузера для авторских инструментов (черновики) | пусто |
 | `HABR_USER_UUID` | Значение заголовка `habr-user-uuid` | пусто |
-| `HABR_X_APP_VERSION` | Значение заголовка `x-app-version` | `2.325.7` |
+| `HABR_X_APP_VERSION` | Значение заголовка `x-app-version` | `2.329.0` |
 | `DOCMOST_BASE_URL` | База для скачивания картинок Docmost (перезалив) | пусто |
 | `DOCMOST_API_TOKEN` | Bearer-токен для скачивания вложений Docmost | пусто |
 | `PROXY` | HTTP/SOCKS прокси для httpx | пусто |

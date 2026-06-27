@@ -11,6 +11,7 @@ upload, save, etc.) lives elsewhere and calls these functions:
 - ``collect_image_srcs``     -> which images need uploading to habrastorage,
 - ``docmost_to_habr_doc``    -> the actual tree translation (src rewritten),
 - ``serialize_source``       -> compact JSON string for ``postForm.text.source``,
+- ``preview_text``           -> plain-text announce derived from the body,
 - ``make_preview_doc``       -> a minimal non-empty announce ("preview") doc.
 
 Design notes:
@@ -32,9 +33,11 @@ from typing import Any
 _MIN_HEADING_LEVEL = 1
 _MAX_HEADING_LEVEL = 3
 
-# Approximate character budget for the preview/announce paragraph.
-_PREVIEW_MAX_CHARS = 220
-_PREVIEW_FALLBACK_TEXT = "Читать далее"
+# Habr requires the rendered announce (postForm.preview) text to be 100..3000
+# characters (HTTP 422 otherwise). We hard-cap at the upper bound here; the
+# lower bound is enforced by the caller (client.create_draft), which can raise a
+# clear error instead of silently padding.
+_PREVIEW_MAX_CHARS = 3000
 
 # Docmost mark type -> Habr mark type. Marks not listed here are either dropped
 # silently (highlight/textStyle/comment) or dropped with a warning (anything
@@ -246,11 +249,12 @@ def _build_paragraph(
     align = (node.get("attrs") or {}).get("textAlign")
     inline = _convert_inline(node.get("content"), warnings, seen)
     if inline:
-        return {
-            "type": "paragraph",
-            "attrs": {"align": align, "simple": False, "persona": False},
-            "content": inline,
-        }
+        # Habr's editor omits the ``align`` key entirely when alignment is null;
+        # only include it when a real value is present (canonical shape).
+        attrs: dict[str, Any] = {"simple": False, "persona": False}
+        if align:
+            attrs["align"] = align
+        return {"type": "paragraph", "attrs": attrs, "content": inline}
     # An empty (e.g. trailing) paragraph carries no content key and no align.
     return {"type": "paragraph", "attrs": {"simple": False, "persona": False}}
 
@@ -333,20 +337,25 @@ def _build_spoiler(title: str, children: list[dict]) -> dict:
 
 # Simple wrapper nodes whose only job is to map a Docmost block name to a Habr
 # block name and recurse into BLOCK children. (Lists, blockquote, list items.)
+# Habr's list item node is named ``listitem`` (one word, lowercase) — emitting
+# ``list_item`` (snake_case) makes the editor-2 form reject text.source with 422.
 _WRAPPER_RENAME = {
     "blockquote": "blockquote",
     "bulletList": "unordered_list",
     "orderedList": "ordered_list",
-    "listItem": "list_item",
+    "listItem": "listitem",
     # taskList/taskItem reuse the plain list nodes; checkbox state is lost.
     "taskList": "unordered_list",
-    "taskItem": "list_item",
+    "taskItem": "listitem",
 }
 
-# Habr block types known to be safe inside a list_item. Anything else (code_block,
-# image, blockquote, spoiler, …) is kept but flagged, since the list_item schema
-# is unconfirmed and the list zone may reject non-paragraph/non-list children.
+# Habr block types confirmed safe inside a listitem. Anything else (code_block,
+# image, blockquote, spoiler, …) is kept but flagged, since the list zone may
+# reject non-paragraph/non-list children. Nested lists carry attrs.type "inner".
 _LIST_ITEM_SAFE_TYPES = {"paragraph", "unordered_list", "ordered_list"}
+
+# Habr list nodes that must carry attrs.type ("outer" top-level, "inner" nested).
+_LIST_TYPES = {"unordered_list", "ordered_list"}
 
 
 def _convert_blocks(
@@ -354,11 +363,14 @@ def _convert_blocks(
     image_url_map: dict[str, str] | None,
     warnings: list[str] | None,
     seen: set[str],
+    nested_list: bool = False,
 ) -> list[dict]:
     """Convert a list of Docmost block nodes into a flat list of Habr blocks.
 
     Unknown wrappers are flattened (their block children spliced into the parent
-    stream) and unknown atoms are dropped; both record a warning.
+    stream) and unknown atoms are dropped; both record a warning. ``nested_list``
+    is True while converting a listitem's children, so a list directly inside a
+    list item is tagged ``attrs.type:"inner"`` instead of ``"outer"``.
     """
     result: list[dict] = []
     if not isinstance(children, list):
@@ -367,7 +379,7 @@ def _convert_blocks(
         if not isinstance(child, dict):
             continue
         result.extend(
-            _convert_block(child, image_url_map, warnings, seen)
+            _convert_block(child, image_url_map, warnings, seen, nested_list)
         )
     return result
 
@@ -377,11 +389,13 @@ def _convert_block(
     image_url_map: dict[str, str] | None,
     warnings: list[str] | None,
     seen: set[str],
+    nested_list: bool = False,
 ) -> list[dict]:
     """Convert a single Docmost block node into zero or more Habr blocks.
 
     Returns a list so a node can expand to several blocks (e.g. a flattened
     wrapper) or to none (e.g. a dropped atom or an unmapped image).
+    ``nested_list`` controls the list ``attrs.type`` (inner vs outer).
     """
     ntype = node.get("type")
 
@@ -395,15 +409,25 @@ def _convert_block(
         return [{"type": "hr", "attrs": {"inserted": True}}]
 
     if ntype in _WRAPPER_RENAME:
+        habr_type = _WRAPPER_RENAME[ntype]
         if ntype == "taskList" or ntype == "taskItem":
             _warn_once(
                 warnings, seen, "task list converted to plain list (checkbox state lost)"
             )
-        inner = _convert_blocks(node.get("content"), image_url_map, warnings, seen)
-        # Habr's list_item schema is unconfirmed; block content other than
-        # paragraphs and nested lists may be rejected by the list zone. Keep it
-        # (non-lossy) but warn once so the user knows the result may not import.
-        if ntype == "listItem" or ntype == "taskItem":
+        is_list_item = ntype in ("listItem", "taskItem")
+        # A listitem's children recurse with nested_list=True so a list inside
+        # it is tagged "inner"; a list's own items keep the current nesting flag.
+        inner = _convert_blocks(
+            node.get("content"),
+            image_url_map,
+            warnings,
+            seen,
+            nested_list=True if is_list_item else nested_list,
+        )
+        if is_list_item:
+            # Block content other than paragraphs and nested lists may be
+            # rejected by the list zone. Keep it (non-lossy) but warn once so the
+            # user knows the result may not import. Items carry NO attrs.
             if any(
                 block.get("type") not in _LIST_ITEM_SAFE_TYPES for block in inner
             ):
@@ -413,7 +437,13 @@ def _convert_block(
                     "list item contains block content Habr may reject "
                     "(code/image/quote/etc.)",
                 )
-        return [{"type": _WRAPPER_RENAME[ntype], "content": inner}]
+            return [{"type": habr_type, "content": inner}]
+        if habr_type in _LIST_TYPES:
+            # Lists carry attrs.type: "inner" when directly inside a list item,
+            # "outer" at top level (or inside blockquote/spoiler/etc.).
+            list_kind = "inner" if nested_list else "outer"
+            return [{"type": habr_type, "attrs": {"type": list_kind}, "content": inner}]
+        return [{"type": habr_type, "content": inner}]
 
     if ntype == "callout":
         # Russian title from the callout's semantic type (info/warning/danger/
@@ -437,7 +467,7 @@ def _convert_block(
     children = node.get("content")
     if isinstance(children, list) and children:
         _warn(warnings, f"unsupported block flattened: {ntype}")
-        return _convert_blocks(children, image_url_map, warnings, seen)
+        return _convert_blocks(children, image_url_map, warnings, seen, nested_list)
     _warn(warnings, f"unsupported block dropped: {ntype}")
     return []
 
@@ -481,6 +511,27 @@ def _collect_plain_text(node: Any) -> str:
     return "".join(parts)
 
 
+def _collect_preview_text(node: Any) -> str:
+    """Concatenate descendant text of ``node`` for the auto-announce.
+
+    Like ``_collect_plain_text`` but also picks up a Habr ``code_block`` node's
+    ``attrs.code`` string (code blocks store their source there, not as child
+    ``text`` nodes), so a body made entirely of code still yields a non-empty
+    announce. Kept separate from ``_collect_plain_text`` so spoiler/details title
+    extraction semantics are unchanged.
+    """
+    if not isinstance(node, dict):
+        return ""
+    if node.get("type") == "text":
+        return node.get("text", "") or ""
+    if node.get("type") == "code_block":
+        return (node.get("attrs") or {}).get("code", "") or ""
+    parts: list[str] = []
+    for child in node.get("content") or []:
+        parts.append(_collect_preview_text(child))
+    return "".join(parts)
+
+
 # --- Public API: full document conversion ------------------------------------
 
 
@@ -518,35 +569,59 @@ def serialize_source(habr_doc: dict) -> str:
 # --- Public API: preview / announce ------------------------------------------
 
 
-def make_preview_doc(habr_doc: dict) -> dict:
-    """Build a minimal NON-EMPTY Habr 'preview' (announce) doc.
+def preview_text(habr_doc: dict, announce: str | None = None) -> str:
+    """Derive the announce ("preview") plain text for a Habr post.
+
+    If ``announce`` is given, its stripped value is used. Otherwise the plain
+    text of ALL body blocks is concatenated in document order (paragraphs,
+    headings, list items, blockquotes, spoiler content — every ``text`` node),
+    joined by single spaces with collapsed whitespace. The result is hard-capped
+    at ``_PREVIEW_MAX_CHARS`` (3000), trimmed on a word boundary when possible.
+
+    Habr requires the rendered announce to be 100..3000 chars; this function
+    enforces only the upper bound (never pads). The lower bound is the caller's
+    responsibility so it can raise a clear error instead of silently padding.
+    """
+    if announce is not None:
+        text = announce.strip()
+    else:
+        # Collect each top-level block's text separately, then join blocks with a
+        # space so adjacent paragraphs/headings/items do not run together. Within
+        # a block, collapse any whitespace (hardBreak/code newlines) to a space.
+        # Use the preview collector so code_block source text contributes too.
+        block_texts: list[str] = []
+        for block in habr_doc.get("content") or []:
+            collapsed = " ".join(_collect_preview_text(block).split())
+            if collapsed:
+                block_texts.append(collapsed)
+        text = " ".join(block_texts)
+
+    if len(text) > _PREVIEW_MAX_CHARS:
+        capped = text[:_PREVIEW_MAX_CHARS].rstrip()
+        space = capped.rfind(" ")
+        # Only honor the word boundary if it does not discard most of the
+        # announce; otherwise keep the hard cut so a text with a single early
+        # space does not collapse to a few characters.
+        if space > _PREVIEW_MAX_CHARS // 2:
+            capped = capped[:space].rstrip()
+        text = capped
+    return text
+
+
+def make_preview_doc(habr_doc: dict, announce: str | None = None) -> dict:
+    """Build a Habr 'preview' (announce) doc as a single inline paragraph.
 
     The preview zone allows only inline content, so we emit exactly one
-    paragraph. Its text is the concatenated text of the first paragraph/heading
-    found in ``habr_doc``, trimmed to ~220 chars. If no text is found, fall back
-    to a paragraph reading 'Читать далее'.
+    paragraph whose text comes from ``preview_text(habr_doc, announce)``. If the
+    text is empty we still emit one paragraph (the caller validates length).
     """
-    text = ""
-    for block in (habr_doc.get("content") or []):
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") in ("paragraph", "heading"):
-            candidate = _collect_plain_text(block).strip()
-            if candidate:
-                text = candidate
-                break
-
-    if not text:
-        text = _PREVIEW_FALLBACK_TEXT
-    if len(text) > _PREVIEW_MAX_CHARS:
-        text = text[:_PREVIEW_MAX_CHARS].rstrip()
-
+    text = preview_text(habr_doc, announce)
     return {
         "type": "doc",
         "content": [
             {
                 "type": "paragraph",
-                "attrs": {"align": None, "simple": False, "persona": False},
+                "attrs": {"simple": False, "persona": False},
                 "content": [{"type": "text", "text": text}],
             }
         ],

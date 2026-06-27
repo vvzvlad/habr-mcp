@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # Value for the `habr-user-uuid` request header (mirrors the habr_uuid cookie).
     habr_user_uuid: str | None = None
     # Value for the `x-app-version` request header (Habr frontend version).
-    habr_x_app_version: str = "2.325.7"
+    habr_x_app_version: str = "2.329.0"
     # Base URL to resolve & download Docmost image attachments (image reupload only).
     docmost_base_url: str | None = None
     # Bearer token to download Docmost attachments (image reupload only).

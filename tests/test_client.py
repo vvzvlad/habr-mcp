@@ -288,7 +288,8 @@ def test_author_headers_have_full_bundle(author_settings):
     headers = client._author_headers(referer="https://habr.com/ru/articles/new/")
     assert headers["csrf-token"] == "CSRF456"
     assert headers["habr-user-uuid"] == "uuid-1"
-    assert headers["x-app-version"] == "2.325.7"
+    assert headers["x-app-version"] == "2.329.0"
+    assert headers["accept"] == "application/json, text/plain, */*"
     assert headers["Cookie"].startswith("connect_sid=")
     assert headers["referer"] == "https://habr.com/ru/articles/new/"
 
@@ -298,12 +299,18 @@ async def test_create_draft_hits_save_no_id(author_settings, docmost_doc):
     import json as json_module
 
     route = respx.post(f"{BASE_URL}publication/save").mock(
-        return_value=httpx.Response(200, json={"id": "555"})
+        return_value=httpx.Response(200, json={"post": "555", "ok": True})
     )
+    announce = "А" * 120  # >= 100 chars so the announce passes validation
     client = HabrClient(author_settings)
     try:
         result = await client.create_draft(
-            "Заголовок", docmost_doc, hubs=[19791, 4992], tags=["t1"], flow=2
+            "Заголовок",
+            docmost_doc,
+            hubs=[19791, 4992],
+            tags=["t1"],
+            flow=2,
+            announce=announce,
         )
     finally:
         await client.aclose()
@@ -316,17 +323,25 @@ async def test_create_draft_hits_save_no_id(author_settings, docmost_doc):
     assert body["hubs"] == ["19791", "4992"]
     assert all(isinstance(h, str) for h in body["hubs"])
     assert body["text"]["editorVersion"] == 2
+    # flow is required now: a non-empty string.
     assert body["flow"] == "2"
-    # text.source is a non-empty JSON string carrying the converted paragraph.
+    assert isinstance(body["flow"], str) and body["flow"]
+    # text.source is a non-empty JSON string carrying the converted paragraph and
+    # uses the canonical "listitem" naming (never "list_item").
     source = body["text"]["source"]
     assert isinstance(source, str) and source
     assert "Привет, Хабр." in source
+    assert "list_item" not in source
+    # preview (announce) rendered text is at least 100 chars.
+    preview_source = json_module.loads(body["preview"]["source"])
+    preview_render = preview_source["content"][0]["content"][0]["text"]
+    assert len(preview_render) >= 100
     # Author headers must be present.
     assert request.headers["csrf-token"] == "CSRF456"
     assert request.headers["habr-user-uuid"] == "uuid-1"
-    assert request.headers["x-app-version"] == "2.325.7"
+    assert request.headers["x-app-version"] == "2.329.0"
     assert result["warnings"] == []
-    assert result["response"] == {"id": "555"}
+    assert result["response"] == {"post": "555", "ok": True}
 
 
 @respx.mock
@@ -464,7 +479,7 @@ async def test_list_flows_sends_publication_id(author_settings):
 async def test_create_draft_no_images_no_extra_http(author_settings, docmost_doc):
     # An image-free doc must not trigger any download/upload HTTP at all.
     save_route = respx.post(f"{BASE_URL}publication/save").mock(
-        return_value=httpx.Response(200, json={"id": "1"})
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
     )
     upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, json={})
@@ -472,10 +487,135 @@ async def test_create_draft_no_images_no_extra_http(author_settings, docmost_doc
     client = HabrClient(author_settings)
     try:
         mapping, warnings = await client._reupload_images(docmost_doc)
-        await client.create_draft("t", docmost_doc)
+        await client.create_draft(
+            "t", docmost_doc, hubs=["1"], tags=["t1"], flow="2", announce="А" * 120
+        )
     finally:
         await client.aclose()
     assert mapping == {}
     assert warnings == []
     assert not upload_route.called
     assert save_route.called
+
+
+# -- create_draft required-field validation ----------------------------------
+
+
+@respx.mock
+async def test_create_draft_requires_hubs(author_settings, docmost_doc):
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t", docmost_doc, hubs=None, tags=["t1"], flow="2"
+            )
+    finally:
+        await client.aclose()
+    assert "хаб" in str(exc.value)
+    assert "resolve_hubs" in str(exc.value)
+    assert not save_route.called
+
+
+@respx.mock
+async def test_create_draft_requires_tags(author_settings, docmost_doc):
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t", docmost_doc, hubs=["1"], tags=[], flow="2"
+            )
+    finally:
+        await client.aclose()
+    assert "тег" in str(exc.value)
+    assert not save_route.called
+
+
+@respx.mock
+async def test_create_draft_requires_flow(author_settings, docmost_doc):
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        # Whitespace-only flow is treated as missing.
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t", docmost_doc, hubs=["1"], tags=["t1"], flow="   "
+            )
+    finally:
+        await client.aclose()
+    assert "поток" in str(exc.value)
+    assert "list_flows" in str(exc.value)
+    assert not save_route.called
+
+
+@respx.mock
+async def test_create_draft_short_announce_raises(author_settings, docmost_doc):
+    # The fixture body ("Привет, Хабр.") renders to < 100 chars, so the derived
+    # announce is too short and create must raise before any save.
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t", docmost_doc, hubs=["1"], tags=["t1"], flow="2"
+            )
+    finally:
+        await client.aclose()
+    assert "100 символов" in str(exc.value)
+    assert not save_route.called
+
+
+@respx.mock
+async def test_update_draft_announce_override(author_settings, post_data_payload):
+    import json as json_module
+
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    announce = "Новый анонс статьи " * 10  # >= 100 chars so validation passes
+    client = HabrClient(author_settings)
+    try:
+        # announce-only update (no docmost_doc) must still rebuild the preview.
+        await client.update_draft(42, announce=announce)
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(save_route.calls.last.request.content)
+    preview_source = json_module.loads(body["preview"]["source"])
+    assert preview_source["content"][0]["content"][0]["text"] == announce.strip()
+    assert body["preview"]["editorVersion"] == 2
+
+
+@respx.mock
+async def test_update_draft_short_announce_raises_no_save(
+    author_settings, post_data_payload
+):
+    # A too-short announce on the preview-rebuild path must raise the same clear
+    # error as create_draft, before any save request goes out. Only the GET
+    # post-data route is mocked; save/<id> must never be called.
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.update_draft(42, announce="слишком коротко")
+    finally:
+        await client.aclose()
+    assert "100 символов" in str(exc.value)
+    assert not save_route.called
