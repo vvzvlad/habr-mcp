@@ -1,59 +1,79 @@
-# AGENTS
+# Agent Instructions — habr-mcp
 
-Онбординг для агентов и людей, работающих с проектом.
+HTTP-only, multi-tenant MCP server for habr.com (read + write + author/draft
+tools). It talks to Habr's internal (undocumented) JSON API
+`https://habr.com/kek/v2/`.
 
-## Структура
+## Project structure
+- `main.py` — thin entry point: build the server and run it over `streamable-http`.
+- `src/settings.py` — configuration (pydantic-settings, from ENV / `.env`);
+  exposes the `settings` singleton built via `load_settings_or_exit`.
+- `src/config_errors.py` — turns a pydantic `ValidationError` into a clear
+  startup message naming the missing/invalid env var (shared startup helper).
+- `src/client.py` — async HTTP client for Habr `kek/v2`. All route/body/header
+  specifics are centralised here.
+- `src/store.py` — per-token credential store (`creds.json`) written under the
+  state dir; credentials are encrypted at rest.
+- `src/registry.py` — builds one `HabrClient` per bearer token from the store.
+- `src/formatting.py` — pure formatting helpers (HTML → Markdown/text, rendering
+  of feeds/articles/comments/drafts).
+- `src/converter.py` — pure Docmost (TipTap) ProseMirror → Habr editorVersion-2
+  converter (for the author/draft tools).
+- `src/server.py` — `build_server()`: registers MCP tools (read, write
+  comments/votes, the author/draft layer).
+- `tests/` — pytest (httpx is mocked via respx).
+- `data/` — runtime state (the encrypted credential store); gitignored, mounted
+  as a docker volume.
 
-- `main.py` — тонкая точка входа: собирает сервер и запускает stdio.
-- `src/settings.py` — конфигурация (pydantic-settings, из ENV / `.env`).
-- `src/client.py` — async HTTP-клиент к Habr `kek/v2` API. Вся специфика
-  маршрутов/тел/заголовков централизована здесь.
-- `src/formatting.py` — чистые функции форматирования (HTML→Markdown/текст,
-  рендер списков/статьи/комментариев/черновика).
-- `src/converter.py` — чистый конвертер Docmost (TipTap) ProseMirror →
-  Habr editorVersion-2 (для авторских инструментов).
-- `src/server.py` — `build_server()`: регистрирует MCP-инструменты (чтение,
-  запись-комментарии/голоса, авторский слой черновиков).
-- `tests/` — тесты на pytest (httpx мокается через respx).
+## Identity & multi-tenancy
+The server has NO global Habr credentials. Each user puts an opaque
+`Authorization: Bearer <token>` in their MCP client config and calls
+`habr_login` once with their browser Cookie. Per-token credentials are stored,
+encrypted at rest, under `data/` (`HABR_MCP_STATE_DIR`). Reading works
+anonymously; write and author tools require a logged-in session and report a
+clear guard message when the caller is not ready.
 
-## Авторский слой (черновики)
-
-Инструменты `create_draft` / `get_draft` / `update_draft` / `delete_draft` /
-`resolve_hubs` / `list_flows` публикуют страницы Docmost в **черновики** Хабра
-(`publication/…`, протокол в `docs/habr-publication-protocol.md`). Перевод
-черновика в публичный статус («Опубликовать») **не реализован** — пробел протокола §8.
-
-Авторская авторизация отличается от записи комментариев: нужен `HABR_COOKIE`
-(полный Cookie-заголовок браузера: `connect_sid` + `hsec_id` + `habrsession_id` + …)
-и `HABR_CSRF_TOKEN`. Тело статьи конвертируется из ProseMirror Docmost в дерево
-Habr editorVersion-2 (`src/converter.py`). Картинки сначала скачиваются из Docmost
-(`DOCMOST_BASE_URL` + `DOCMOST_API_TOKEN`) и перезаливаются на habrastorage
-(`publication/upload`, ЭКСПЕРИМЕНТАЛЬНО) — сбой картинки не прерывает публикацию
-(текст уходит, нерезолвленные картинки выбрасываются конвертером с предупреждением).
+## Author layer (drafts)
+`create_draft` / `get_draft` / `update_draft` / `delete_draft` / `resolve_hubs` /
+`list_flows` publish Docmost pages into Habr **drafts** (`publication/…`, protocol
+in `docs/habr-publication-protocol.md`). Promoting a draft to public status
+("Publish") is **NOT implemented** — protocol gap §8. Article bodies are
+converted from Docmost ProseMirror to a Habr editorVersion-2 tree
+(`src/converter.py`). Images are first downloaded from Docmost
+(`DOCMOST_BASE_URL` + `DOCMOST_API_TOKEN`) and re-uploaded to habrastorage; an
+image failure does not abort publication (text goes through, unresolved images
+are dropped with a warning).
 
 ## Setup
-
+All routine actions go through the `Makefile` — run `make help` to list targets.
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-dev.txt
-cp .env.example .env   # затем при необходимости заполнить креды записи
+make install           # create .venv and install dev/test deps
+cp .env.example .env   # then fill in the values  (shortcut: make env)
 ```
 
 ## Running tests
-
 ```bash
-.venv/bin/pytest
+make test              # runs .venv/bin/pytest
+```
+
+## Running the app
+```bash
+make run               # runs .venv/bin/python main.py
 ```
 
 ## Conventions
-
-- Конфигурация — только из ENV / `.env` через `src/settings.py` (pydantic-settings).
-- Креды записи (`HABR_CONNECT_SID`, `HABR_CSRF_TOKEN`) живут только в `.env` —
-  никаких дефолтных кред в коде.
-- Чтение работает анонимно; запись требует сессии и аккуратно сообщает об ошибке,
-  если кред нет.
-- Все комментарии в коде — на английском.
-- Описания MCP-инструментов (`description=`) — на русском (текст для LLM).
-- Тесты обязательны для нового кода.
-- Write-эндпоинты — reverse-engineered из внутреннего API Хабра; маршруты правятся
-  централизованно в `src/client.py`.
+- All mutable state goes under `data/` (the per-token credential store).
+- All config comes from ENV / `.env` (see `.env.example`), read through
+  `Settings`; missing/invalid env var → fail at startup with a readable message.
+- No global Habr credentials in code or env; per-user creds arrive via
+  `habr_login` and are stored encrypted under `data/`.
+- Code comments are in English; MCP tool descriptions (`description=`) are in
+  Russian (text for the LLM).
+- All repeated actions (env setup, tests, run) go through `make` targets.
+- Python always runs inside a local `.venv`, created automatically by `make` on
+  first use — never the system Python.
+- Tests are required for new code; in CI `build` depends on `test`.
+- No `EXPOSE` in the Dockerfile — Traefik publishes the service via compose
+  labels (MCP clients connect to `https://<host>/mcp`).
+- Write endpoints are reverse-engineered from Habr's internal API; URL/body/header
+  logic is centralised in `src/client.py` — fix it there if Habr changes routes.

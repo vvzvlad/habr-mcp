@@ -10,6 +10,8 @@ credential store. The global env only configures shared, non-secret options
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.config_errors import load_settings_or_exit
+
 # Realistic desktop Chrome UA so Habr's API treats us like a normal browser.
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -31,7 +33,8 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", validation_alias="HABR_MCP_HOST")
     port: int = Field(default=8765, validation_alias="HABR_MCP_PORT")
     # Directory holding the per-token credential store (env HABR_MCP_STATE_DIR).
-    state_dir: str = Field(default="~/.habr-mcp", validation_alias="HABR_MCP_STATE_DIR")
+    # All mutable state lives under data/ so it maps to the docker volume.
+    state_dir: str = Field(default="data", validation_alias="HABR_MCP_STATE_DIR")
     # Content/flow language (`fl`) and interface language (`hl`); Habr uses both.
     habr_lang: str = "ru"
     # Per-user carrier fields. These are NO LONGER read from the global env for
@@ -69,3 +72,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", extra="ignore", populate_by_name=True
     )
+
+
+# Module-level singleton: build settings via the standard helper so a future
+# required env var gives a clean message instead of a raw pydantic traceback.
+# With no required fields today this never fails, but it is the standard pattern.
+settings = load_settings_or_exit(Settings)

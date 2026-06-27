@@ -1,138 +1,127 @@
 # Habr MCP server
 
-MCP-сервер (stdio) для habr.com. Даёт LLM возможность читать и писать на Хабре
-через внутренний (недокументированный) JSON API `https://habr.com/kek/v2/`.
+HTTP-only, multi-tenant MCP server for habr.com. It lets an LLM read and write on
+Habr (and publish drafts) through Habr's internal, undocumented JSON API
+`https://habr.com/kek/v2/`.
 
-- **Чтение** работает анонимно (поиск, ленты, статья, комментарии).
-- **Запись** (комментарий, голос, закладка) требует залогиненной сессии:
-  cookie `connect.sid` + CSRF-токен, передаются через переменные окружения.
+- **Read** works anonymously (search, feeds, article, comments).
+- **Write** (comment, vote, bookmark) and the **author/draft** tools require a
+  logged-in session.
 
-## Установка
+The server runs over `streamable-http` and serves many users at once. There are
+**no global credentials**: each user authenticates with their own bearer token
+and stores their own Habr session.
+
+## Auth flow (per user)
+
+1. Put an opaque `Authorization: Bearer <token>` in your MCP client config — pick
+   any random secret; it is just an identity key for this server.
+2. Call `habr_login` once, passing the full `Cookie` header from a logged-in
+   habr.com browser session (and a CSRF token where required).
+3. The server stores your credentials, **encrypted at rest**, under `data/`
+   (`HABR_MCP_STATE_DIR`), keyed by your token. Subsequent calls reuse them.
+
+Reading needs no login; write/author tools report a clear guard message until you
+have logged in.
+
+## Run locally
 
 ```bash
 cd /Users/vvzvlad/Data/Projects/habr-mcp
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-dev.txt
+make install   # create .venv and install dev/test deps
+make test      # run the test suite
+make run       # start the HTTP MCP server
 ```
 
-Для прод-запуска без тестов достаточно `requirements.txt`.
+`make help` lists all targets. Config comes from ENV / `.env`
+(`cp .env.example .env`, shortcut `make env`); for read-only use nothing needs to
+be filled in.
 
-## Конфигурация
+## Deploy
 
-Скопируйте `.env.example` в `.env` и при необходимости заполните значения.
-Для чтения ничего заполнять не нужно.
+Deploy the prebuilt image — do not build on prod. `docker-compose.yml` pulls
+`ghcr.io/vvzvlad/habr-mcp:latest`, mounts a named volume on `/app/data` (the
+encrypted credential store), sets `HABR_MCP_HOST=0.0.0.0` so the container binds
+all interfaces, and publishes the MCP port (8765) via Traefik. MCP clients then
+connect to `https://<host>/mcp`. watchtower auto-updates the container on a new
+`latest`.
 
-Переменные:
+## Configuration
 
-| Переменная | Назначение | По умолчанию |
+Server-level (shared, non-secret) variables:
+
+| Variable | Purpose | Default |
 | --- | --- | --- |
-| `HABR_LANG` | Язык контента (`fl`) и интерфейса (`hl`) | `ru` |
-| `HABR_CONNECT_SID` | Значение cookie `connect.sid` (для записи) | пусто |
-| `HABR_CSRF_TOKEN` | CSRF-токен (для записи) | пусто |
-| `HABR_CSRF_COOKIE_NAME` | Имя CSRF-cookie (double-submit) | `csrf_token` |
-| `HABR_COOKIE` | Полный Cookie-заголовок браузера для авторских инструментов (черновики) | пусто |
-| `HABR_USER_UUID` | Значение заголовка `habr-user-uuid` | пусто |
-| `HABR_X_APP_VERSION` | Значение заголовка `x-app-version` | `2.329.0` |
-| `DOCMOST_BASE_URL` | База для скачивания картинок Docmost (перезалив) | пусто |
-| `DOCMOST_API_TOKEN` | Bearer-токен для скачивания вложений Docmost | пусто |
-| `PROXY` | HTTP/SOCKS прокси для httpx | пусто |
-| `REQUEST_TIMEOUT` | Таймаут запроса, сек | `20` |
-| `PER_PAGE` | Размер страницы лент/поиска | `20` |
+| `HABR_MCP_HOST` | HTTP bind address (`0.0.0.0` in Docker) | `127.0.0.1` |
+| `HABR_MCP_PORT` | HTTP bind port | `8765` |
+| `HABR_MCP_STATE_DIR` | Directory for the encrypted credential store | `data` |
+| `HABR_LANG` | Content (`fl`) and interface (`hl`) language | `ru` |
+| `HABR_X_APP_VERSION` | Value for the `x-app-version` request header | `2.329.0` |
+| `PROXY` | HTTP/SOCKS proxy URL for httpx | empty |
+| `REQUEST_TIMEOUT` | httpx request timeout, seconds | `20` |
+| `PER_PAGE` | Page size for feeds / search | `20` |
+| `DOCMOST_BASE_URL` | Base URL to download Docmost images for reupload | empty |
+| `DOCMOST_API_TOKEN` | Bearer token to download Docmost attachments | empty |
 
-### Где взять `connect.sid` и CSRF-токен
+Per-user Habr credentials are **not** environment variables — they arrive via
+`habr_login` and live encrypted under `data/`.
 
-Залогиньтесь на habr.com в браузере, затем откройте DevTools:
+## Tools
 
-- **`HABR_CONNECT_SID`**: вкладка *Application* → *Cookies* → `https://habr.com`
-  → скопируйте значение cookie `connect.sid`.
-- **`HABR_CSRF_TOKEN`**: вкладка *Network* → выполните любое действие записи
-  (например, поставьте плюс статье) → откройте запрос → *Request Headers* →
-  скопируйте значение заголовка `csrf-token` (оно совпадает со значением cookie
-  `csrf_token`).
+Auth / session:
 
-## Запуск тестов
-
-```bash
-.venv/bin/pytest -q
-```
-
-## Подключение к Claude Code / Claude Desktop
-
-Зарегистрируйте сервер как stdio MCP в конфиге клиента:
-
-```json
-{
-  "mcpServers": {
-    "habr": {
-      "command": "/Users/vvzvlad/Data/Projects/habr-mcp/.venv/bin/python",
-      "args": ["main.py"],
-      "cwd": "/Users/vvzvlad/Data/Projects/habr-mcp",
-      "env": {
-        "HABR_LANG": "ru",
-        "HABR_CONNECT_SID": "",
-        "HABR_CSRF_TOKEN": "",
-        "HABR_CSRF_COOKIE_NAME": "csrf_token"
-      }
-    }
-  }
-}
-```
-
-`HABR_CONNECT_SID` / `HABR_CSRF_TOKEN` можно оставить пустыми для режима только
-для чтения.
-
-## Инструменты
-
-Чтение (анонимно):
-
-| Инструмент | Параметры | Что делает |
+| Tool | Parameters | What it does |
 | --- | --- | --- |
-| `search_articles` | `query: str`, `page: int = 1` | Поиск статей по тексту |
-| `list_articles` | `feed: str = "top"` (`top`/`new`/`news`), `period: str = "daily"` (`daily`/`weekly`/`monthly`/`yearly`/`alltime`), `hub: str \| None`, `page: int = 1` | Лента статей |
-| `get_article` | `article_id: int` | Полный текст статьи (Markdown) |
-| `get_comments` | `article_id: int`, `limit: int = 100` | Дерево комментариев |
+| `habr_login` | `cookie: str`, `csrf_token: str \| None` | Save your Habr session (full browser Cookie) for your token |
+| `auth_status` | — | Show your current auth state |
 
-Запись (требует сессии):
+Read (anonymous):
 
-| Инструмент | Параметры | Что делает |
+| Tool | Parameters | What it does |
 | --- | --- | --- |
-| `post_comment` | `article_id: int`, `text: str`, `parent_id: int \| None` | Комментарий (0/None = верхний уровень) |
-| `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Голос за статью |
-| `vote_comment` | `comment_id: int`, `direction: str` | Голос за комментарий (ЭКСПЕРИМЕНТАЛЬНО) |
-| `bookmark_article` | `article_id: int`, `add: bool = True` | Закладка (удаление ЭКСПЕРИМЕНТАЛЬНО) |
+| `search_articles` | `query: str`, `page: int = 1` | Full-text article search |
+| `list_articles` | `feed: str = "top"` (`top`/`new`/`news`), `period: str = "daily"` (`daily`/`weekly`/`monthly`/`yearly`/`alltime`), `hub: str \| None`, `page: int = 1` | Article feed |
+| `get_article` | `article_id: int` | Full article text (Markdown) |
+| `get_comments` | `article_id: int`, `limit: int = 100` | Comment tree |
 
-Авторский слой — черновики (требует авторской сессии: `HABR_COOKIE` + `HABR_CSRF_TOKEN`):
+Write (requires a session):
 
-| Инструмент | Параметры | Что делает |
+| Tool | Parameters | What it does |
 | --- | --- | --- |
-| `create_draft` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Создать черновик из страницы Docmost (`doc` = ProseMirror-JSON из `get_page_json`) |
-| `get_draft` | `post_id: int` | Прочитать черновик (сводка + сырые ProseMirror-исходники) |
-| `update_draft` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Обновить поля черновика (read-modify-write автосейв) |
-| `delete_draft` | `post_id: int` | Удалить черновик |
-| `resolve_hubs` | `aliases: list[str]`, `post_id: int \| None` | Алиасы хабов → числовые id |
-| `list_flows` | `publication_id: int \| None` | Список потоков (id / alias / title) |
+| `post_comment` | `article_id: int`, `text: str`, `parent_id: int \| None` | Comment (0/None = top level) |
+| `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Vote on an article |
+| `vote_comment` | `comment_id: int`, `direction: str` | Vote on a comment (EXPERIMENTAL) |
+| `bookmark_article` | `article_id: int`, `add: bool = True` | Bookmark (removal EXPERIMENTAL) |
 
-Авторские инструменты публикуют страницы Docmost в **черновики** Хабра. Тело статьи
-конвертируется из ProseMirror Docmost в дерево Habr editorVersion-2; картинки
-скачиваются из Docmost (`DOCMOST_BASE_URL` + `DOCMOST_API_TOKEN`) и перезаливаются
-на habrastorage (сбой картинки не прерывает публикацию — текст уходит, картинка
-выбрасывается с предупреждением). Перевод черновика в публичный статус
-(«Опубликовать») **не реализован** — пробел протокола (`docs/habr-publication-protocol.md` §8).
+Author layer — drafts (requires an author session):
 
-## Про write-эндпоинты (reverse-engineering)
+| Tool | Parameters | What it does |
+| --- | --- | --- |
+| `create_draft` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`) |
+| `get_draft` | `post_id: int` | Read a draft (summary + raw ProseMirror sources) |
+| `update_draft` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields (read-modify-write autosave) |
+| `delete_draft` | `post_id: int` | Delete a draft |
+| `resolve_hubs` | `aliases: list[str]`, `post_id: int \| None` | Hub aliases → numeric ids |
+| `list_flows` | `publication_id: int \| None` | List flows (id / alias / title) |
+
+The author tools publish Docmost pages into Habr **drafts**. Promoting a draft to
+public status ("Publish") is **not implemented** — protocol gap
+(`docs/habr-publication-protocol.md` §8).
+
+## About the write endpoints (reverse-engineering)
 
 > Write endpoints are reverse-engineered from habr.com's internal API.
 
-Маршруты записи получены реверс-инжинирингом внутреннего API Хабра и подтверждены
-на уровне маршрута (без авторизации возвращают `HTTP 401 Unauthenticated`):
+Routes are confirmed at the route level (without auth they return
+`HTTP 401 Unauthenticated`):
 
-- `post_comment` → `POST articles/<id>/comments/add/` — подтверждён.
-- `vote_article` → `POST articles/<id>/votes/up|down/` — подтверждён.
-- `bookmark_article` (добавление) → `POST articles/<id>/bookmarks/` — подтверждён.
-- `vote_comment` → `POST articles/comments/<id>/votes/up|down/` —
-  **ЭКСПЕРИМЕНТАЛЬНО**: маршрут найден, но не проверен с реальной сессией.
-- `bookmark_article` (удаление) → `DELETE articles/<id>/bookmarks/` —
-  **ЭКСПЕРИМЕНТАЛЬНО**, best-effort.
+- `post_comment` → `POST articles/<id>/comments/add/` — confirmed.
+- `vote_article` → `POST articles/<id>/votes/up|down/` — confirmed.
+- `bookmark_article` (add) → `POST articles/<id>/bookmarks/` — confirmed.
+- `vote_comment` → `POST articles/comments/<id>/votes/up|down/` — **EXPERIMENTAL**
+  (route found, not verified against a real session).
+- `bookmark_article` (remove) → `DELETE articles/<id>/bookmarks/` —
+  **EXPERIMENTAL**, best-effort.
 
-Если Хабр поменяет маршруты — вся логика URL/тел/заголовков централизована в
-`src/client.py`, правьте там.
+If Habr changes routes, all URL/body/header logic is centralised in
+`src/client.py` — fix it there.

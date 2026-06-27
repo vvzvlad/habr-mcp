@@ -94,7 +94,7 @@ class CredStore:
     plaintext fallback (``enc: false`` with ``cookie``/``csrf``/``uuid``).
     """
 
-    def __init__(self, state_dir: str = "~/.habr-mcp") -> None:
+    def __init__(self, state_dir: str = "data") -> None:
         self._dir = Path(state_dir).expanduser()
         self._path = self._dir / "creds.json"
         self._lock = threading.Lock()

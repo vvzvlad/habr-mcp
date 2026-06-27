@@ -1,0 +1,44 @@
+# Deploy template. Pull the prebuilt image from ghcr.io — do NOT build on prod.
+#
+# This is the WEB-SERVICE variant: the MCP server binds an inbound HTTP port and
+# is published via Traefik. MCP clients connect to https://<host>/mcp.
+# This server has NO global secrets — per-user Habr credentials are supplied at
+# runtime via the habr_login tool and stored encrypted under /app/data.
+
+volumes:
+  habr_mcp:
+
+networks:
+  docker_main_net:
+    external: true
+
+services:
+  habr-mcp:
+    image: ghcr.io/vvzvlad/habr-mcp:latest
+    container_name: habr-mcp
+    restart: always
+    volumes:
+      - habr_mcp:/app/data          # encrypted credential store survives restart/update
+    environment:
+      # Container must bind all interfaces; the 127.0.0.1 default is local-only.
+      HABR_MCP_HOST: 0.0.0.0
+      HABR_MCP_STATE_DIR: data
+      TZ: Europe/Moscow
+    networks:
+      - docker_main_net
+    logging:
+      driver: "json-file"
+      options:
+        max-file: 5
+        max-size: 10m
+    labels:
+      # Route to the MCP port (8765). Clients connect to https://<host>/mcp.
+      traefik.enable: "true"
+      traefik.http.routers.habrmcp.rule: Host(`habr-mcp.example.com`)
+      traefik.http.services.habrmcp.loadBalancer.server.port: 8765
+      traefik.http.routers.habrmcp.entrypoints: websecure
+      traefik.http.routers.habrmcp.tls: "true"
+      traefik.http.routers.habrmcp.tls.certresolver: letsEncrypt
+      com.centurylinklabs.watchtower.enable: "true"   # auto-update the image
+    # No healthcheck: the MCP streamable-http endpoint (/mcp) has no plain
+    # /health route, so a healthcheck is intentionally omitted for this transport.
