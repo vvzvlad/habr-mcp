@@ -258,14 +258,16 @@ async def test_habr_login_stores_creds_and_autofetches_csrf(tmp_path, monkeypatc
 
 @respx.mock
 async def test_habr_login_no_csrf_returns_error(tmp_path, monkeypatch):
-    # Feed page without a csrf meta -> auto-detect fails -> ask for csrf_token.
+    # Feed page without a csrf meta -> auto-detect fails -> report a likely
+    # bad/expired cookie (there is no csrf_token parameter to ask for anymore).
     respx.get("https://habr.com/ru/feed/").mock(
         return_value=httpx.Response(200, text="<html>no token here</html>")
     )
     monkeypatch.setattr(server_mod, "token_from_ctx", lambda ctx: "hmcp_nocsrf")
     server = build_server(Settings(state_dir=str(tmp_path)))
     out = _text(await server.call_tool("habr_login", {"cookie": "habr_uuid=u"}))
-    assert "csrf_token" in out
+    assert "csrf" in out.lower()
+    assert "cookie" in out.lower()
     assert CredStore(str(tmp_path)).get("hmcp_nocsrf") is None
 
 

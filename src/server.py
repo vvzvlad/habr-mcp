@@ -777,22 +777,23 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "cookie бессмысленно. И ТОЛЬКО ПОТОМ, когда ключ уже добавлен в headers, "
             "передай cookie — ПОЛНЫЙ заголовок Cookie из залогиненного браузера "
             "(DevTools → Network → любой запрос к habr.com → Copy → значение "
-            "заголовка Cookie). csrf_token необязателен: если не передан, я попробую "
-            "вытащить его сам со страницы ленты. После успеха становятся доступны "
+            "заголовка Cookie). csrf-токен подберётся автоматически — больше ничего "
+            "передавать не нужно. После успеха становятся доступны "
             "все инструменты Хабра."
         ),
     )
-    async def habr_login(cookie: str, ctx: Context, csrf_token: str | None = None) -> str:
+    async def habr_login(cookie: str, ctx: Context) -> str:
         state, token, _client = await resolve(ctx, store, registry)
         if state == ANON or not token:
             return anon_message()
         uuid = derive_uuid_from_cookie(cookie)
-        csrf = csrf_token or await fetch_csrf_token(cookie, base_settings)
+        csrf = await fetch_csrf_token(cookie, base_settings)
         if not csrf:
             return (
-                "Не удалось автоматически определить csrf-токен. Передай его "
-                "явным аргументом csrf_token (значение заголовка csrf-token из "
-                "DevTools)."
+                "Не удалось определить csrf-токен по этому cookie — скорее всего он "
+                "невалидный или устарел. Скопируй СВЕЖИЙ полный заголовок Cookie из "
+                "залогиненного браузера (DevTools → Network → любой запрос к habr.com "
+                "→ Copy → значение заголовка Cookie) и вызови habr_login ещё раз."
             )
         store.set(token, cookie, csrf, uuid)
         # Drop any cached client built from the OLD creds so the next tool call

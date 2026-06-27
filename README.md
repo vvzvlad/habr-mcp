@@ -73,7 +73,7 @@ Auth / session:
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `habr_login` | `cookie: str`, `csrf_token: str \| None` | Save your Habr session (full browser Cookie) for your token |
+| `habr_login` | `cookie: str` | Save your Habr session (full browser Cookie) for your token; the csrf token is auto-detected |
 | `auth_status` | — | Show your current auth state |
 
 Read (anonymous):
