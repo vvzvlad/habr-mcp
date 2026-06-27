@@ -14,6 +14,14 @@ upload, save, etc.) lives elsewhere and calls these functions:
 - ``preview_text``           -> plain-text announce derived from the body,
 - ``make_preview_doc``       -> a minimal non-empty announce ("preview") doc.
 
+Handled Docmost node families (everything else degrades gracefully):
+- block: ``paragraph``, ``heading``, ``codeBlock``, ``horizontalRule``,
+  ``blockquote``, ``bulletList``/``orderedList``/``listItem`` (+ ``taskList``/
+  ``taskItem``), ``callout``, ``details``, ``image``, ``table`` (with
+  ``tableRow``/``tableCell``/``tableHeader``), ``mathBlock``, ``embed``/
+  ``youtube``;
+- inline: ``text`` (+ marks), ``hardBreak``, ``mention``, ``mathInline``.
+
 Design notes:
 - We never emit a node/mark ``type`` that is not part of the Habr schema. Unknown
   inputs degrade gracefully and (optionally) record a human-readable warning.
@@ -24,6 +32,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # --- Habr editorVersion-2 constants -----------------------------------------
@@ -172,6 +181,70 @@ def _convert_marks(
     return result
 
 
+# --- Mentions ----------------------------------------------------------------
+
+# A bare ``@nick`` inside plain text. The lookbehind rejects ``@`` preceded by a
+# word char / ``@`` / ``.`` / ``/`` / ``-`` so emails (user@example.com), paths,
+# and doubled ``@@`` are skipped. A nick is 2..30 of ``[A-Za-z0-9_]``.
+_MENTION_RE = re.compile(r"(?<![\w@./-])@([A-Za-z0-9_]{2,30})\b")
+
+# A standalone nick (no leading ``@``) used to validate a Docmost mention label.
+_NICK_RE = re.compile(r"^[A-Za-z0-9_]{2,30}$")
+
+
+def _build_mention(nick: str) -> dict:
+    """Build a Habr inline ``mention`` node for ``nick`` (leading ``@`` optional).
+
+    Habr accepts a mention for any nick (it does not verify the user exists on
+    save), so we only build the canonical node shape here.
+    """
+    nick = nick.lstrip("@").strip()
+    return {
+        "type": "mention",
+        "attrs": {
+            "identity": nick,
+            "identityType": "user",
+            "display": "@" + nick,
+            "link": "/users/" + nick,
+            "class": "mention",
+        },
+    }
+
+
+def _split_text_with_mentions(text: str, marks: list[dict]) -> list[dict]:
+    """Split ``text`` into interleaved text + ``mention`` inline nodes.
+
+    Literal text segments carry ``marks`` (the already-converted marks of the
+    source text node); ``mention`` nodes carry NO marks. When ``text`` has no
+    ``@nick`` match, a single text node (with marks) is returned unchanged.
+    Empty segments never produce empty text nodes.
+    """
+
+    def _text_node(segment: str) -> dict:
+        node: dict[str, Any] = {"type": "text", "text": segment}
+        if marks:
+            node["marks"] = marks
+        return node
+
+    nodes: list[dict] = []
+    pos = 0
+    matched = False
+    for match in _MENTION_RE.finditer(text):
+        matched = True
+        pre = text[pos:match.start()]
+        if pre:
+            nodes.append(_text_node(pre))
+        nodes.append(_build_mention(match.group(1)))
+        pos = match.end()
+    if not matched:
+        # No @nick: keep the original single text node (don't restructure).
+        return [_text_node(text)]
+    tail = text[pos:]
+    if tail:
+        nodes.append(_text_node(tail))
+    return nodes
+
+
 # --- Inline content ----------------------------------------------------------
 
 
@@ -193,23 +266,55 @@ def _convert_inline(
             continue
         ctype = child.get("type")
         if ctype == "text":
-            node: dict[str, Any] = {"type": "text", "text": child.get("text", "")}
+            text = child.get("text", "")
             marks = _convert_marks(child.get("marks"), warnings, seen)
-            if marks:
-                node["marks"] = marks
-            result.append(node)
+            # A ``code`` mark means a literal code span: never run @nick detection
+            # inside it (e.g. "@media" must stay verbatim). A ``link`` mark means
+            # the text is part of a hyperlink: a ``@nick`` inside it must keep its
+            # href and stay linked text, not become a mention (which carries no
+            # marks). In both cases emit the text verbatim as one node.
+            skip_split = any(m.get("type") in ("code", "link") for m in marks)
+            if skip_split:
+                node: dict[str, Any] = {"type": "text", "text": text}
+                if marks:
+                    node["marks"] = marks
+                result.append(node)
+            else:
+                # Split out any bare ``@nick`` occurrences into mention nodes,
+                # keeping the surrounding literal text (with its marks) intact.
+                result.extend(_split_text_with_mentions(text, marks))
         elif ctype == "hardBreak":
             result.append({"type": "hard_break"})
         elif ctype == "mention":
-            # No Habr inline-mention equivalent we can safely emit; degrade to
-            # plain text using the mention label.
-            label = (child.get("attrs") or {}).get("label") or "@?"
-            result.append({"type": "text", "text": label})
-            _warn_once(warnings, seen, "mention converted to plain text")
+            # Docmost mention node. Emit a real Habr mention when the label maps
+            # to a single-token nick and the entityType is user (or unknown but
+            # nick-shaped); otherwise fall back to plain text using the label.
+            attrs = child.get("attrs") or {}
+            label = attrs.get("label") or "@?"
+            entity_type = attrs.get("entityType")
+            nick = label.lstrip("@").strip()
+            nick_ok = bool(_NICK_RE.match(nick))
+            user_like = entity_type == "user" or (
+                entity_type in (None, "", "unknown") and nick_ok
+            )
+            if user_like and nick_ok:
+                result.append(_build_mention(nick))
+            else:
+                # e.g. entityType=="page" or a multi-word display label: degrade
+                # to plain text using the label.
+                result.append({"type": "text", "text": label})
+                _warn_once(warnings, seen, "mention converted to plain text")
         elif ctype == "mathInline":
+            # Habr has a native inline LaTeX node; source lives in attrs.source.
+            # Use .strip() ONLY to decide emptiness so a whitespace-only source
+            # (e.g. "   ") is treated as empty and dropped; emit the ORIGINAL
+            # (un-stripped) source when non-empty so interior LaTeX spaces survive.
             text = (child.get("attrs") or {}).get("text") or ""
-            result.append({"type": "text", "text": text})
-            _warn_once(warnings, seen, "mathInline converted to plain text")
+            latex = text.strip()
+            if latex:
+                result.append({"type": "inline_formula", "attrs": {"source": text}})
+            else:
+                _warn_once(warnings, seen, "empty mathInline dropped")
         else:
             _warn(warnings, f"unsupported inline dropped: {ctype}")
     return result
@@ -331,6 +436,122 @@ def _build_image(
 def _build_spoiler(title: str, children: list[dict]) -> dict:
     """Build a Habr ``spoiler`` (details/callout collapse) with a title."""
     return {"type": "spoiler", "attrs": {"title": title}, "content": children}
+
+
+# --- Table -------------------------------------------------------------------
+
+
+def _build_table_paragraph(
+    node: dict,
+    warnings: list[str] | None,
+    seen: set[str],
+) -> dict:
+    """Build a Habr ``table_paragraph`` from a Docmost ``paragraph``.
+
+    Cells use ``table_paragraph`` (not ``paragraph``); ``align`` is null unless the
+    source paragraph carries a real ``textAlign``. The ``content`` key is omitted
+    when the paragraph has no inline content.
+    """
+    align = (node.get("attrs") or {}).get("textAlign") or None
+    inline = _convert_inline(node.get("content"), warnings, seen)
+    para: dict[str, Any] = {"type": "table_paragraph", "attrs": {"align": align}}
+    if inline:
+        para["content"] = inline
+    return para
+
+
+def _build_table_cell(
+    node: dict,
+    warnings: list[str] | None,
+    seen: set[str],
+) -> dict:
+    """Build a Habr ``table_cell`` from a Docmost ``tableCell``/``tableHeader``.
+
+    Habr has no distinct header cell, so a ``tableHeader`` also maps here (header
+    styling is lost). ``colspan``/``rowspan`` default to 1 and are coerced to int;
+    ``colwidth`` is passed through as-is (default null). Each block child becomes a
+    ``table_paragraph``: a real paragraph maps directly, any other block (nested
+    list, blockquote, …) is flattened to a ``table_paragraph`` carrying that
+    block's collected inline text (and a once-warning). A cell always contains at
+    least one ``table_paragraph``.
+    """
+    attrs = node.get("attrs") or {}
+
+    def _coerce_span(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 1
+
+    cell_attrs = {
+        "colspan": _coerce_span(attrs.get("colspan", 1)),
+        "rowspan": _coerce_span(attrs.get("rowspan", 1)),
+        "colwidth": attrs.get("colwidth"),
+    }
+
+    paragraphs: list[dict] = []
+    for child in node.get("content") or []:
+        if not isinstance(child, dict):
+            continue
+        if child.get("type") == "paragraph":
+            paragraphs.append(_build_table_paragraph(child, warnings, seen))
+        else:
+            # Complex cell content (nested list, quote, etc.) is not representable
+            # as-is inside a Habr cell: flatten it to a single table_paragraph of
+            # its collected inline text (best effort) and warn once.
+            text = _collect_plain_text(child)
+            flat: dict[str, Any] = {"type": "table_paragraph", "attrs": {"align": None}}
+            if text:
+                flat["content"] = [{"type": "text", "text": text}]
+            paragraphs.append(flat)
+            _warn_once(
+                warnings, seen, "complex table cell content flattened to text"
+            )
+
+    if not paragraphs:
+        # Cells must contain at least one table_paragraph (empty otherwise).
+        paragraphs.append({"type": "table_paragraph", "attrs": {"align": None}})
+
+    return {"type": "table_cell", "attrs": cell_attrs, "content": paragraphs}
+
+
+def _build_table(
+    node: dict,
+    warnings: list[str] | None,
+    seen: set[str],
+) -> list[dict]:
+    """Build a Habr ``table_wrapper`` > ``table`` from a Docmost ``table``.
+
+    Docmost ``tableRow`` -> ``table_row``; ``tableCell``/``tableHeader`` ->
+    ``table_cell``. A table with zero rows is dropped with a warning (returns []).
+    """
+    rows: list[dict] = []
+    for row in node.get("content") or []:
+        if not isinstance(row, dict) or row.get("type") != "tableRow":
+            continue
+        cells: list[dict] = []
+        for cell in row.get("content") or []:
+            if not isinstance(cell, dict):
+                continue
+            if cell.get("type") in ("tableCell", "tableHeader"):
+                cells.append(_build_table_cell(cell, warnings, seen))
+        if not cells:
+            # A row whose children yield no cells would become an empty table_row
+            # (content: []), which Habr rejects. Skip it instead of emitting it.
+            _warn(warnings, "empty table row skipped")
+            continue
+        rows.append({"type": "table_row", "content": cells})
+
+    if not rows:
+        _warn(warnings, "empty table dropped")
+        return []
+
+    return [
+        {
+            "type": "table_wrapper",
+            "content": [{"type": "table", "content": rows}],
+        }
+    ]
 
 
 # --- Block dispatch ----------------------------------------------------------
@@ -461,9 +682,39 @@ def _convert_block(
         built = _build_image(node, image_url_map, warnings)
         return [built] if built is not None else []
 
-    # Fallback for ANY other block (table, columns, video, embed, ...): if it has
-    # block children, flatten them into the parent stream so we never silently
-    # lose nested content; if it is an atom, drop it. Both record a warning.
+    if ntype == "table":
+        return _build_table(node, warnings, seen)
+
+    if ntype == "mathBlock":
+        # Block LaTeX: Habr's "formula" node carries the source in attrs.source.
+        # Use .strip() ONLY to decide emptiness so a whitespace-only source
+        # (e.g. "   ") is dropped; emit the ORIGINAL (un-stripped) source when
+        # non-empty so interior LaTeX whitespace is preserved.
+        text = (node.get("attrs") or {}).get("text") or ""
+        latex = text.strip()
+        if not latex:
+            _warn(warnings, "empty mathBlock dropped")
+            return []
+        return [{"type": "formula", "attrs": {"source": text}}]
+
+    if ntype in ("embed", "youtube"):
+        # Both store the URL in attrs.src. Habr resolves the oEmbed server-side
+        # (GET https://embedd.srv.habr.com/geturl), so we never fetch anything.
+        src = (node.get("attrs") or {}).get("src")
+        if not isinstance(src, str) or not src:
+            _warn(warnings, f"embed dropped (no src): {ntype}")
+            return []
+        return [{"type": "embed", "attrs": {"src": src, "inserted": False}}]
+
+    if ntype in ("tableRow", "tableCell", "tableHeader"):
+        # These are only ever built inside _build_table; a stray one at dispatch
+        # level has no valid Habr standalone form, so drop it with a warning.
+        _warn(warnings, f"unsupported block dropped: {ntype}")
+        return []
+
+    # Fallback for ANY other block (columns, video, ...): if it has block
+    # children, flatten them into the parent stream so we never silently lose
+    # nested content; if it is an atom, drop it. Both record a warning.
     children = node.get("content")
     if isinstance(children, list) and children:
         _warn(warnings, f"unsupported block flattened: {ntype}")

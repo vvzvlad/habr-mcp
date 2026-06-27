@@ -168,7 +168,6 @@ async def test_tools_are_registered(anon_server):
         "post_comment",
         "vote_article",
         "vote_comment",
-        "bookmark_article",
         "create_draft",
         "get_draft",
         "update_draft",
@@ -327,6 +326,31 @@ async def test_vote_article_tool_with_creds(seeded_server):
         )
     )
     assert "Голос за статью учтён" in out
+
+
+async def test_vote_comment_tool_rejects_bad_direction(seeded_server):
+    out = _text(
+        await seeded_server.call_tool(
+            "vote_comment",
+            {"article_id": 100, "comment_id": 5, "direction": "sideways"},
+        )
+    )
+    assert "Недопустимый direction" in out
+
+
+@respx.mock
+async def test_vote_comment_tool_with_creds(seeded_server):
+    route = respx.post(f"{BASE_URL}articles/100/comments/5/votes").mock(
+        return_value=httpx.Response(200, json={"vote": {"value": 1}, "score": 0})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "vote_comment",
+            {"article_id": 100, "comment_id": 5, "direction": "up"},
+        )
+    )
+    assert "Голос за комментарий учтён" in out
+    assert route.calls.last.request.url.path == "/kek/v2/articles/100/comments/5/votes"
 
 
 @respx.mock

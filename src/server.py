@@ -34,6 +34,7 @@ from src.formatting import (
 )
 from src.registry import ClientRegistry
 from src.settings import Settings
+from src.settings import settings as _default_settings
 from src.store import CredStore, derive_uuid_from_cookie, generate_key
 
 # Allowed enum values, reused for validation and error messages.
@@ -168,7 +169,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     token. No global Habr client exists. The full static tool list is registered
     regardless of auth state — gating happens inside each tool via return value.
     """
-    base_settings = settings or Settings()
+    base_settings = settings or _default_settings
     store = CredStore(base_settings.state_dir)
     registry = ClientRegistry(base_settings, store)
 
@@ -337,43 +338,25 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     @mcp.tool(
         name="vote_comment",
         description=(
-            "ЭКСПЕРИМЕНТАЛЬНО: проголосовать за комментарий Habr (требует "
-            "сохранённого логина — вызови habr_login). Маршрут подтверждён, но не "
-            "проверен с реальной сессией. Аргумент comment_id — id комментария. "
-            "Аргумент direction — 'up' или 'down'."
+            "Проголосовать за комментарий Habr (требует сохранённого логина — "
+            "вызови habr_login). Нужны оба id: article_id — id статьи, "
+            "comment_id — id комментария. Аргумент direction — 'up' (плюс) или "
+            "'down' (минус)."
         ),
     )
-    async def vote_comment(comment_id: int, direction: str, ctx: Context) -> str:
+    async def vote_comment(
+        article_id: int, comment_id: int, direction: str, ctx: Context
+    ) -> str:
         client, msg = await _ready_client(ctx)
         if msg:
             return msg
         if direction not in DIRECTIONS:
             return f"Недопустимый direction='{direction}'. Допустимо: up, down."
         try:
-            result = await client.vote_comment(comment_id, direction)
+            result = await client.vote_comment(article_id, comment_id, direction)
         except HabrApiError as exc:
             return str(exc)
         return f"Голос за комментарий учтён. Ответ Habr: {result}"
-
-    @mcp.tool(
-        name="bookmark_article",
-        description=(
-            "Добавить статью Habr в закладки или убрать из закладок (требует "
-            "сохранённого логина — вызови habr_login). Аргумент article_id — id "
-            "статьи. Аргумент add — True добавить (по умолчанию), False убрать. "
-            "Удаление помечено как экспериментальное."
-        ),
-    )
-    async def bookmark_article(article_id: int, ctx: Context, add: bool = True) -> str:
-        client, msg = await _ready_client(ctx)
-        if msg:
-            return msg
-        try:
-            result = await client.bookmark_article(article_id, add)
-        except HabrApiError as exc:
-            return str(exc)
-        verb = "добавлена в закладки" if add else "убрана из закладок"
-        return f"Статья {verb}. Ответ Habr: {result}"
 
     # -- author tools: drafts (require a logged-in author session) ----------
 

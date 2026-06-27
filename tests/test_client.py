@@ -189,19 +189,6 @@ async def test_post_comment_keeps_existing_html(auth_settings):
 
 
 @respx.mock
-async def test_bookmark_remove_uses_delete(auth_settings):
-    route = respx.delete(f"{BASE_URL}articles/100/bookmarks/").mock(
-        return_value=httpx.Response(200, json={"ok": True})
-    )
-    client = HabrClient(auth_settings)
-    try:
-        await client.bookmark_article(100, add=False)
-    finally:
-        await client.aclose()
-    assert route.called
-
-
-@respx.mock
 async def test_non_json_body_raises(anon_settings):
     respx.get(f"{BASE_URL}articles/100/").mock(
         return_value=httpx.Response(404, text="Cannot GET /articles/100/")
@@ -253,11 +240,51 @@ async def test_vote_comment_invalid_direction_raises_no_request(auth_settings):
     client = HabrClient(auth_settings)
     try:
         with pytest.raises(HabrApiError) as exc:
-            await client.vote_comment(5, "")
+            await client.vote_comment(100, 5, "")
     finally:
         await client.aclose()
     assert "up" in str(exc.value) and "down" in str(exc.value)
     assert not route.called
+
+
+@respx.mock
+async def test_vote_comment_up_hits_votes_route_with_value_body(auth_settings):
+    import json as json_module
+
+    route = respx.post(f"{BASE_URL}articles/100/comments/5/votes").mock(
+        return_value=httpx.Response(200, json={"vote": {"value": 1}, "score": 0})
+    )
+    client = HabrClient(auth_settings)
+    try:
+        await client.vote_comment(100, 5, "up")
+    finally:
+        await client.aclose()
+
+    request = route.calls.last.request
+    assert request.url.path == "/kek/v2/articles/100/comments/5/votes"
+    body = json_module.loads(request.content)
+    assert body == {"value": 1}
+    assert request.headers["csrf-token"] == "CSRF456"
+    cookie = request.headers["Cookie"]
+    assert "connect.sid=SID123" in cookie
+    assert "csrf_token=CSRF456" in cookie
+
+
+@respx.mock
+async def test_vote_comment_down_sends_negative_value(auth_settings):
+    import json as json_module
+
+    route = respx.post(f"{BASE_URL}articles/100/comments/5/votes").mock(
+        return_value=httpx.Response(200, json={"vote": {"value": -1}, "score": 0})
+    )
+    client = HabrClient(auth_settings)
+    try:
+        await client.vote_comment(100, 5, "down")
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(route.calls.last.request.content)
+    assert body == {"value": -1}
 
 
 @respx.mock

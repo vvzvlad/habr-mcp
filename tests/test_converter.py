@@ -363,6 +363,193 @@ def test_unknown_mark_dropped_with_warning():
     assert any("unsupported mark dropped: weird" in w for w in warnings)
 
 
+# --- mentions ----------------------------------------------------------------
+
+
+_MENTION_ATTRS = {
+    "identity": "vvzvlad",
+    "identityType": "user",
+    "display": "@vvzvlad",
+    "link": "/users/vvzvlad",
+    "class": "mention",
+}
+
+
+def test_docmost_mention_node_user_becomes_habr_mention():
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [
+                {"type": "mention", "attrs": {"label": "@vvzvlad", "entityType": "user"}}
+            ],
+        }
+    )
+    warnings: list[str] = []
+    inline = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"]
+    assert inline == [{"type": "mention", "attrs": _MENTION_ATTRS}]
+    # A real mention emits no "converted to plain text" warning.
+    assert not any("mention converted to plain text" in w for w in warnings)
+
+
+def test_docmost_mention_node_page_falls_back_to_text():
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [
+                {
+                    "type": "mention",
+                    "attrs": {"label": "Some Page", "entityType": "page"},
+                }
+            ],
+        }
+    )
+    warnings: list[str] = []
+    inline = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"]
+    assert inline == [{"type": "text", "text": "Some Page"}]
+    assert any("mention converted to plain text" in w for w in warnings)
+
+
+def test_docmost_mention_node_multiword_label_falls_back_to_text():
+    # A multi-word display label is not a single-token nick: plain-text fallback.
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [
+                {
+                    "type": "mention",
+                    "attrs": {"label": "@John Doe", "entityType": "user"},
+                }
+            ],
+        }
+    )
+    warnings: list[str] = []
+    inline = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"]
+    assert inline == [{"type": "text", "text": "@John Doe"}]
+    assert any("mention converted to plain text" in w for w in warnings)
+
+
+def test_plain_text_at_nick_becomes_mention_between_text():
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [_text("Спросите @vvzvlad про это")],
+        }
+    )
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [
+        {"type": "text", "text": "Спросите "},
+        {"type": "mention", "attrs": _MENTION_ATTRS},
+        {"type": "text", "text": " про это"},
+    ]
+
+
+def test_plain_text_mention_keeps_marks_on_surrounding_text_only():
+    # The text node is bold: surrounding literal segments keep the bold mark,
+    # but the mention node itself carries NO marks.
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [_text("ping @vvzvlad now", [{"type": "bold"}])],
+        }
+    )
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [
+        {"type": "text", "text": "ping ", "marks": [{"type": "bold"}]},
+        {"type": "mention", "attrs": _MENTION_ATTRS},
+        {"type": "text", "text": " now", "marks": [{"type": "bold"}]},
+    ]
+
+
+def test_email_like_text_produces_no_mention():
+    src = _doc({"type": "paragraph", "content": [_text("написал user@example.com")]})
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [{"type": "text", "text": "написал user@example.com"}]
+
+
+def test_doubled_at_produces_no_mention():
+    src = _doc({"type": "paragraph", "content": [_text("look @@x here")]})
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [{"type": "text", "text": "look @@x here"}]
+
+
+def test_short_nick_produces_no_mention():
+    # A 1-char nick ("@a") is below the 2-char minimum: stays literal.
+    src = _doc({"type": "paragraph", "content": [_text("hi @a there")]})
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [{"type": "text", "text": "hi @a there"}]
+
+
+def test_code_mark_text_with_at_stays_literal():
+    # An inline code span containing "@media" must NOT become a mention.
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [_text("@media", [{"type": "code"}])],
+        }
+    )
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [{"type": "text", "text": "@media", "marks": [{"type": "code"}]}]
+
+
+def test_link_mark_text_with_at_stays_single_linked_node():
+    # A ``@nick`` inside linked text must keep its href: stay one text node with
+    # the link mark, NOT split into a (mark-less) mention that loses the link.
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [
+                _text(
+                    "ask @vvzvlad here",
+                    [{"type": "link", "attrs": {"href": "https://x"}}],
+                )
+            ],
+        }
+    )
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [
+        {
+            "type": "text",
+            "text": "ask @vvzvlad here",
+            "marks": [{"type": "link", "attrs": {"href": "https://x"}}],
+        }
+    ]
+    # No mention node was produced inside the link.
+    assert all(node["type"] != "mention" for node in inline)
+
+
+def test_mention_nick_length_boundary():
+    # Documents the _MENTION_RE boundary: a nick of 2..30 word chars matches; a
+    # 31-char run does not (the regex caps the identity length at 30).
+    nick30 = "a" * 30
+    src = _doc({"type": "paragraph", "content": [_text("@" + nick30)]})
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [
+        {
+            "type": "mention",
+            "attrs": {
+                "identity": nick30,
+                "identityType": "user",
+                "display": "@" + nick30,
+                "link": "/users/" + nick30,
+                "class": "mention",
+            },
+        }
+    ]
+
+    nick31 = "a" * 31
+    src = _doc({"type": "paragraph", "content": [_text("@" + nick31)]})
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    # Over the 30-char cap: no mention, stays literal text.
+    assert inline == [{"type": "text", "text": "@" + nick31}]
+
+
+def test_plain_prose_without_at_has_no_spurious_mention():
+    # Regression: ordinary prose with no @ yields a single unchanged text node.
+    src = _doc({"type": "paragraph", "content": [_text("just normal prose here")]})
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [{"type": "text", "text": "just normal prose here"}]
+
+
 # --- callout / details -> spoiler --------------------------------------------
 
 
@@ -494,18 +681,15 @@ def test_unknown_block_atom_dropped_with_warning():
 
 
 def test_unknown_wrapper_block_flattened_preserves_children():
-    # A table wrapper: unknown to Habr, but its paragraph children survive.
+    # A "columns" wrapper: unknown to Habr, but its paragraph children survive.
     src = _doc(
         {
-            "type": "table",
+            "type": "columns",
             "content": [
                 {
-                    "type": "tableRow",
+                    "type": "column",
                     "content": [
-                        {
-                            "type": "tableCell",
-                            "content": [{"type": "paragraph", "content": [_text("cell")]}],
-                        }
+                        {"type": "paragraph", "content": [_text("cell")]}
                     ],
                 }
             ],
@@ -518,7 +702,7 @@ def test_unknown_wrapper_block_flattened_preserves_children():
     para = out["content"][0]
     assert para["type"] == "paragraph"
     assert para["content"][0]["text"] == "cell"
-    assert any("unsupported block flattened: table" in w for w in warnings)
+    assert any("unsupported block flattened: columns" in w for w in warnings)
 
 
 # --- other block nodes -------------------------------------------------------
@@ -533,6 +717,377 @@ def test_blockquote_and_hr():
     assert out[0]["type"] == "blockquote"
     assert out[0]["content"][0]["type"] == "paragraph"
     assert out[1] == {"type": "hr", "attrs": {"inserted": True}}
+
+
+# --- table -------------------------------------------------------------------
+
+
+def _table_cell(cell_type: str, text: str | None, **attrs: object) -> dict:
+    """Build a Docmost table cell (tableCell/tableHeader) holding one paragraph."""
+    content: list[dict] = []
+    if text is not None:
+        content.append({"type": "paragraph", "content": [_text(text)]})
+    elif text is None:
+        # An empty cell: a paragraph with no content.
+        content.append({"type": "paragraph"})
+    node: dict = {"type": cell_type, "content": content}
+    if attrs:
+        node["attrs"] = attrs
+    return node
+
+
+def test_table_maps_to_table_wrapper_with_cells_and_paragraphs():
+    src = _doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        _table_cell("tableHeader", "H1"),
+                        _table_cell("tableHeader", "H2"),
+                    ],
+                },
+                {
+                    "type": "tableRow",
+                    "content": [
+                        _table_cell("tableCell", "A1"),
+                        _table_cell("tableCell", "B1"),
+                    ],
+                },
+            ],
+        }
+    )
+    out = docmost_to_habr_doc(src)["content"][0]
+    assert out["type"] == "table_wrapper"
+    table = out["content"][0]
+    assert table["type"] == "table"
+    rows = table["content"]
+    assert [r["type"] for r in rows] == ["table_row", "table_row"]
+    # Header row: tableHeader maps to table_cell (Habr has no header cell).
+    header_cells = rows[0]["content"]
+    assert [c["type"] for c in header_cells] == ["table_cell", "table_cell"]
+    first = header_cells[0]
+    assert first["attrs"] == {"colspan": 1, "rowspan": 1, "colwidth": None}
+    para = first["content"][0]
+    assert para["type"] == "table_paragraph"
+    assert para["attrs"] == {"align": None}
+    assert para["content"] == [{"type": "text", "text": "H1"}]
+    # Body row cell text preserved.
+    assert rows[1]["content"][0]["content"][0]["content"][0]["text"] == "A1"
+
+
+def test_table_cell_colspan_rowspan_colwidth_coerced():
+    src = _doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        _table_cell(
+                            "tableCell", "x", colspan="2", rowspan=3, colwidth=[120]
+                        )
+                    ],
+                }
+            ],
+        }
+    )
+    cell = docmost_to_habr_doc(src)["content"][0]["content"][0]["content"][0]["content"][0]
+    # colspan/rowspan coerced to int; colwidth passed through as-is.
+    assert cell["attrs"] == {"colspan": 2, "rowspan": 3, "colwidth": [120]}
+
+
+def test_table_empty_cell_yields_one_empty_table_paragraph():
+    src = _doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [_table_cell("tableCell", None)],  # empty paragraph
+                }
+            ],
+        }
+    )
+    cell = docmost_to_habr_doc(src)["content"][0]["content"][0]["content"][0]["content"][0]
+    assert len(cell["content"]) == 1
+    empty_para = cell["content"][0]
+    assert empty_para["type"] == "table_paragraph"
+    assert empty_para["attrs"] == {"align": None}
+    assert "content" not in empty_para
+
+
+def test_table_cell_with_no_paragraphs_gets_empty_table_paragraph():
+    # A cell whose only child is something with no text still gets one cell para.
+    src = _doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [{"type": "tableCell", "content": []}],
+                }
+            ],
+        }
+    )
+    cell = docmost_to_habr_doc(src)["content"][0]["content"][0]["content"][0]["content"][0]
+    assert cell["content"] == [{"type": "table_paragraph", "attrs": {"align": None}}]
+
+
+def test_table_complex_cell_content_flattened_with_warning():
+    # A nested list inside a cell flattens to a table_paragraph of its text.
+    src = _doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        {
+                            "type": "tableCell",
+                            "content": [
+                                {
+                                    "type": "bulletList",
+                                    "content": [
+                                        {
+                                            "type": "listItem",
+                                            "content": [
+                                                {
+                                                    "type": "paragraph",
+                                                    "content": [_text("li-text")],
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    warnings: list[str] = []
+    cell = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"][0]["content"][0]["content"][0]
+    para = cell["content"][0]
+    assert para["type"] == "table_paragraph"
+    assert para["content"] == [{"type": "text", "text": "li-text"}]
+    assert any("complex table cell content flattened" in w for w in warnings)
+
+
+def test_table_with_no_rows_dropped_with_warning():
+    src = _doc({"type": "table", "content": []})
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(src, warnings=warnings)
+    assert out["content"] == []
+    assert any("empty table dropped" in w for w in warnings)
+
+
+def test_table_row_with_no_valid_cells_skipped_not_emitted_empty():
+    # A tableRow whose children yield no cells must be skipped (with a warning),
+    # not emitted as a table_row with content: []. The valid row still survives.
+    src = _doc(
+        {
+            "type": "table",
+            "content": [
+                # Row with no recognizable cells (only a stray non-cell child).
+                {
+                    "type": "tableRow",
+                    "content": [{"type": "paragraph", "content": [_text("stray")]}],
+                },
+                # A valid row so the table itself is not dropped as empty.
+                {
+                    "type": "tableRow",
+                    "content": [_table_cell("tableCell", "ok")],
+                },
+            ],
+        }
+    )
+    warnings: list[str] = []
+    table = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"][0]
+    rows = table["content"]
+    # Only the valid row is emitted; the empty one is skipped (no content: []).
+    assert len(rows) == 1
+    assert rows[0]["type"] == "table_row"
+    assert rows[0]["content"][0]["type"] == "table_cell"
+    assert any("empty table row skipped" in w for w in warnings)
+
+
+# --- math blocks / inline formula --------------------------------------------
+
+
+def test_math_block_becomes_formula():
+    src = _doc({"type": "mathBlock", "attrs": {"text": "a^2"}})
+    out = docmost_to_habr_doc(src)["content"][0]
+    assert out == {"type": "formula", "attrs": {"source": "a^2"}}
+
+
+def test_empty_math_block_dropped_with_warning():
+    src = _doc({"type": "mathBlock", "attrs": {"text": ""}})
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(src, warnings=warnings)
+    assert out["content"] == []
+    assert any("empty mathBlock dropped" in w for w in warnings)
+
+
+def test_whitespace_only_math_block_dropped_with_warning():
+    # A source of only whitespace must be treated as empty (no junk formula node).
+    src = _doc({"type": "mathBlock", "attrs": {"text": "   "}})
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(src, warnings=warnings)
+    assert out["content"] == []
+    assert any("empty mathBlock dropped" in w for w in warnings)
+
+
+def test_math_block_preserves_interior_whitespace_in_source():
+    # Non-empty LaTeX with interior spaces is emitted verbatim (un-stripped).
+    src = _doc({"type": "mathBlock", "attrs": {"text": "a + b = c"}})
+    out = docmost_to_habr_doc(src)["content"][0]
+    assert out == {"type": "formula", "attrs": {"source": "a + b = c"}}
+
+
+def test_math_inline_becomes_inline_formula_between_text():
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [
+                _text("before "),
+                {"type": "mathInline", "attrs": {"text": "x_i"}},
+                _text(" after"),
+            ],
+        }
+    )
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [
+        {"type": "text", "text": "before "},
+        {"type": "inline_formula", "attrs": {"source": "x_i"}},
+        {"type": "text", "text": " after"},
+    ]
+
+
+def test_empty_math_inline_skipped_with_warning():
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [
+                _text("a"),
+                {"type": "mathInline", "attrs": {"text": ""}},
+                _text("b"),
+            ],
+        }
+    )
+    warnings: list[str] = []
+    inline = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"]
+    assert inline == [
+        {"type": "text", "text": "a"},
+        {"type": "text", "text": "b"},
+    ]
+    assert any("empty mathInline dropped" in w for w in warnings)
+
+
+def test_whitespace_only_math_inline_skipped_with_warning():
+    # A whitespace-only inline source is treated as empty (no junk formula node).
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [
+                _text("a"),
+                {"type": "mathInline", "attrs": {"text": "   "}},
+                _text("b"),
+            ],
+        }
+    )
+    warnings: list[str] = []
+    inline = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"]
+    assert inline == [
+        {"type": "text", "text": "a"},
+        {"type": "text", "text": "b"},
+    ]
+    assert any("empty mathInline dropped" in w for w in warnings)
+
+
+def test_math_inline_preserves_interior_whitespace_in_source():
+    # Non-empty inline LaTeX with interior spaces is emitted verbatim (un-stripped).
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [{"type": "mathInline", "attrs": {"text": "x + y"}}],
+        }
+    )
+    inline = docmost_to_habr_doc(src)["content"][0]["content"]
+    assert inline == [{"type": "inline_formula", "attrs": {"source": "x + y"}}]
+
+
+# --- embed / youtube ---------------------------------------------------------
+
+
+def test_embed_becomes_embed_node():
+    src = _doc({"type": "embed", "attrs": {"src": "https://youtu.be/x"}})
+    out = docmost_to_habr_doc(src)["content"][0]
+    assert out == {
+        "type": "embed",
+        "attrs": {"src": "https://youtu.be/x", "inserted": False},
+    }
+
+
+def test_youtube_becomes_embed_node():
+    src = _doc({"type": "youtube", "attrs": {"src": "https://youtu.be/y"}})
+    out = docmost_to_habr_doc(src)["content"][0]
+    assert out == {
+        "type": "embed",
+        "attrs": {"src": "https://youtu.be/y", "inserted": False},
+    }
+
+
+def test_embed_without_src_dropped_with_warning():
+    src = _doc({"type": "embed", "attrs": {}})
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(src, warnings=warnings)
+    assert out["content"] == []
+    assert any("embed dropped (no src)" in w for w in warnings)
+
+
+# --- no Docmost node names leak into the output ------------------------------
+
+
+def test_converted_doc_never_contains_docmost_node_names():
+    src = _doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [_table_cell("tableCell", "c")],
+                }
+            ],
+        },
+        {"type": "mathBlock", "attrs": {"text": "e=mc^2"}},
+        {
+            "type": "paragraph",
+            "content": [{"type": "mathInline", "attrs": {"text": "x"}}],
+        },
+        {"type": "youtube", "attrs": {"src": "https://youtu.be/z"}},
+    )
+    source = serialize_source(docmost_to_habr_doc(src))
+    # Docmost-only node names that must never appear as an output "type" token.
+    # NB: "table" is intentionally excluded — Habr's own valid output nests a
+    # {"type":"table"} node inside table_wrapper, so the bare word collides.
+    # tableRow/tableCell collide with no Habr name (Habr uses table_row/cell).
+    for docmost_name in (
+        "tableRow",
+        "tableCell",
+        "mathBlock",
+        "mathInline",
+        "youtube",
+    ):
+        # Match the JSON type token exactly so "table_row"/"table_paragraph" etc.
+        # do not trip the check.
+        assert f'"type":"{docmost_name}"' not in source
+    # The output must use Habr's snake_case table nodes, not Docmost camelCase.
+    assert '"type":"table_wrapper"' in source
+    assert '"type":"table_row"' in source
+    assert '"type":"table_cell"' in source
 
 
 # --- image collection --------------------------------------------------------
@@ -687,6 +1242,57 @@ def test_preview_text_collects_code_block_text():
     out = preview_text(habr)
     assert out  # non-empty
     assert "return 42" in out
+
+
+def test_preview_text_collects_table_cell_text():
+    # The announce derived from a body containing a table must include cell text.
+    habr = docmost_to_habr_doc(
+        _doc(
+            {
+                "type": "table",
+                "content": [
+                    {
+                        "type": "tableRow",
+                        "content": [
+                            _table_cell("tableCell", "ячейка-1"),
+                            _table_cell("tableCell", "ячейка-2"),
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    out = preview_text(habr)
+    assert "ячейка-1" in out
+    assert "ячейка-2" in out
+
+
+def test_preview_text_empty_for_math_and_embed_only_body():
+    # A body of only a mathBlock (formula, no text) and an embed (no text) yields
+    # an EMPTY announce without raising — formula/embed contribute no preview text.
+    habr = docmost_to_habr_doc(
+        _doc(
+            {"type": "mathBlock", "attrs": {"text": "e=mc^2"}},
+            {"type": "embed", "attrs": {"src": "https://youtu.be/x"}},
+        )
+    )
+    # Body is non-empty (formula + embed nodes present) but carries no text.
+    assert [b["type"] for b in habr["content"]] == ["formula", "embed"]
+    assert preview_text(habr) == ""
+
+
+def test_make_preview_doc_math_and_embed_only_body_no_raise():
+    # make_preview_doc over a text-less body must not raise and emits one empty
+    # paragraph (the caller validates the 100-char lower bound).
+    habr = docmost_to_habr_doc(
+        _doc(
+            {"type": "mathBlock", "attrs": {"text": "a^2"}},
+            {"type": "embed", "attrs": {"src": "https://youtu.be/y"}},
+        )
+    )
+    preview = make_preview_doc(habr)
+    assert len(preview["content"]) == 1
+    assert preview["content"][0]["content"][0]["text"] == ""
 
 
 # --- make_preview_doc --------------------------------------------------------

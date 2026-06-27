@@ -152,7 +152,7 @@ class HabrClient:
         return data
 
     def _auth_headers(self) -> dict[str, str]:
-        """Build Cookie + csrf-token headers for comment/vote/bookmark writes.
+        """Build Cookie + csrf-token headers for comment/vote writes.
 
         In the multi-tenant model the user supplies the FULL Cookie header
         (``habr_cookie``), so that is preferred. The legacy single-``connect.sid``
@@ -342,26 +342,21 @@ class HabrClient:
             f"articles/{article_id}/votes/{direction}/", json={}, auth=True
         )
 
-    async def vote_comment(self, comment_id: int, direction: str) -> dict[str, Any]:
-        """Vote on a comment; direction is in the URL path.
+    async def vote_comment(
+        self, article_id: int, comment_id: int, direction: str
+    ) -> dict[str, Any]:
+        """Vote on a comment; direction (``up``/``down``) goes in the JSON body.
 
-        EXPERIMENTAL: route existence confirmed (401 without auth) but not
-        exercised with a real logged-in session.
+        Posts ``{"value": 1}`` (up) or ``{"value": -1}`` (down) to
+        ``articles/<article_id>/comments/<comment_id>/votes`` — the route Habr's
+        own UI hits (verified live, HTTP 200).
         """
         self._check_direction(direction)
+        value = 1 if direction == "up" else -1
         return await self._post(
-            f"articles/comments/{comment_id}/votes/{direction}/", json={}, auth=True
-        )
-
-    async def bookmark_article(self, article_id: int, add: bool = True) -> dict[str, Any]:
-        """Add or remove an article bookmark.
-
-        POST (add) confirmed at the route level; DELETE (remove) is best-effort
-        and EXPERIMENTAL — may need a route tweak.
-        """
-        method = "POST" if add else "DELETE"
-        return await self._post(
-            f"articles/{article_id}/bookmarks/", json={}, method=method, auth=True
+            f"articles/{article_id}/comments/{comment_id}/votes",
+            json={"value": value},
+            auth=True,
         )
 
     # -- author layer: drafts (publication/…) ------------------------------
