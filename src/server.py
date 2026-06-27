@@ -770,11 +770,16 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     @mcp.tool(
         name="habr_login",
         description=(
-            "Сохранить Habr-логин для твоего ключа. Передай cookie — ПОЛНЫЙ "
-            "заголовок Cookie из залогиненного браузера (DevTools → Network → любой "
-            "запрос к habr.com → Copy → значение заголовка Cookie). csrf_token "
-            "необязателен: если не передан, я попробую вытащить его сам со страницы "
-            "ленты. После успеха становятся доступны все инструменты Хабра."
+            "Сохранить Habr-логин для твоего ключа. ПОРЯДОК ВАЖЕН: СНАЧАЛА нужен "
+            "ключ авторизации — строка Authorization: Bearer <ключ> в headers "
+            "MCP-клиента (если ключа ещё нет, вызови auth_status, он сгенерирует "
+            "готовый ключ). БЕЗ этого ключа habr_login не сработает, передавать "
+            "cookie бессмысленно. И ТОЛЬКО ПОТОМ, когда ключ уже добавлен в headers, "
+            "передай cookie — ПОЛНЫЙ заголовок Cookie из залогиненного браузера "
+            "(DevTools → Network → любой запрос к habr.com → Copy → значение "
+            "заголовка Cookie). csrf_token необязателен: если не передан, я попробую "
+            "вытащить его сам со страницы ленты. После успеха становятся доступны "
+            "все инструменты Хабра."
         ),
     )
     async def habr_login(cookie: str, ctx: Context, csrf_token: str | None = None) -> str:
@@ -805,10 +810,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     async def auth_status(ctx: Context) -> str:
         state, token, _client = await resolve(ctx, store, registry)
         if state == ANON:
-            return (
-                "Ключ не задан. Добавь Authorization: Bearer <ключ> в headers "
-                "MCP-клиента и вызови habr_login."
-            )
+            # Hand back a freshly generated, ready-to-paste key (same canonical
+            # guidance as every other tool) instead of a literal "<ключ>"
+            # placeholder, so the user can copy the real key straight in.
+            return anon_message()
         if state == NEEDS_LOGIN:
             return "Ключ есть, но Habr-логин не сохранён. Вызови habr_login."
         # Never reveal any character of the secret token. Show a short,

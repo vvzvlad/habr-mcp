@@ -208,8 +208,10 @@ async def test_anon_habr_login_returns_paste_key_guidance(anon_server):
 
 
 async def test_anon_auth_status(anon_server):
+    # ANON auth_status must hand back a freshly generated, ready-to-paste key
+    # (not a literal "<ключ>" placeholder).
     out = _text(await anon_server.call_tool("auth_status", {}))
-    assert "Ключ не задан" in out
+    assert "Authorization: Bearer hmcp_" in out
 
 
 async def test_needs_login_tool_message(tmp_path, monkeypatch):
