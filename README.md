@@ -98,15 +98,20 @@ Author layer — drafts (requires an author session):
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `create_draft` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`) |
+| `create_draft_from_gdoc` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Google Docs document (`doc` = JSON from `readDocument(format='json')`) |
 | `get_draft` | `post_id: int` | Read a draft (summary + raw ProseMirror sources) |
 | `update_draft` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields (read-modify-write autosave) |
+| `update_draft_from_gdoc` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields from a Google Docs document (`doc` = JSON from `readDocument(format='json')`) |
 | `delete_draft` | `post_id: int` | Delete a draft |
 | `resolve_hubs` | `aliases: list[str]`, `post_id: int \| None` | Hub aliases → numeric ids |
 | `list_flows` | `publication_id: int \| None` | List flows (id / alias / title) |
 
-The author tools publish Docmost pages into Habr **drafts**. Promoting a draft to
-public status ("Publish") is **not implemented** — protocol gap
-(`docs/habr-publication-protocol.md` §8).
+The author tools publish Docmost pages **and Google Docs documents** into Habr
+**drafts**. The `*_from_gdoc` tools first convert the Google Docs API JSON into an
+intermediate Docmost-shaped (TipTap) tree (`src/gdoc_converter.py`), then reuse
+the same Docmost → Habr pipeline (images, marks, tables, lists, previews).
+Promoting a draft to public status ("Publish") is **not implemented** — protocol
+gap (`docs/habr-publication-protocol.md` §8).
 
 ## About the write endpoints (reverse-engineering)
 

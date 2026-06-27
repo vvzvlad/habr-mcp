@@ -169,8 +169,10 @@ async def test_tools_are_registered(anon_server):
         "vote_article",
         "vote_comment",
         "create_draft",
+        "create_draft_from_gdoc",
         "get_draft",
         "update_draft",
+        "update_draft_from_gdoc",
         "delete_draft",
         "resolve_hubs",
         "list_flows",
@@ -395,6 +397,77 @@ async def test_create_draft_tool_reports_id(seeded_server, docmost_doc):
         )
     )
     assert "id=777" in out
+
+
+@respx.mock
+async def test_create_draft_from_gdoc_tool_reports_id(seeded_server):
+    import json as json_module
+
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "888", "ok": True})
+    )
+    gdoc = {
+        "body": {
+            "content": [
+                {
+                    "paragraph": {
+                        "elements": [
+                            {"textRun": {"content": "Тело статьи из Google Docs.\n",
+                                         "textStyle": {}}}
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_gdoc",
+            {
+                "title": "T",
+                "doc": json_module.dumps(gdoc),
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=888" in out
+
+
+async def test_create_draft_from_gdoc_tool_rejects_bad_json(seeded_server):
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_gdoc", {"title": "T", "doc": "{not json"}
+        )
+    )
+    assert "Не удалось разобрать doc" in out
+
+
+@respx.mock
+async def test_update_draft_from_gdoc_tool_saves(seeded_server, post_data_payload):
+    import json as json_module
+
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    gdoc = {"body": {"content": [{"paragraph": {"elements": [
+        {"textRun": {"content": "new body\n", "textStyle": {}}}]}}]}}
+    out = _text(
+        await seeded_server.call_tool(
+            "update_draft_from_gdoc",
+            {
+                "post_id": 42,
+                "doc": json_module.dumps(gdoc),
+                "announce": "Анонс статьи " * 10,
+            },
+        )
+    )
+    assert "Черновик 42 сохранён" in out
 
 
 def test_draft_id_reads_post_key():

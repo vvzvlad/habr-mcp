@@ -144,6 +144,23 @@ def _warnings_suffix(warnings: list[str] | None) -> str:
     return f"\nПредупреждения:\n{bullets}"
 
 
+def _parse_doc_arg(doc: Any) -> tuple[Any, str | None]:
+    """Parse a tool's ``doc`` argument into a Python value.
+
+    Returns ``(parsed, error)``. A JSON string is decoded; a value that is
+    already a dict/list is returned as-is. FastMCP pre-parses object-shaped JSON
+    strings for OPTIONAL (``str | None``) parameters into dicts before the tool
+    runs, so a dict must be accepted here too — otherwise a valid client payload
+    would be rejected. ``error`` is a Russian message when decoding fails.
+    """
+    if isinstance(doc, str):
+        try:
+            return json.loads(doc), None
+        except (ValueError, TypeError) as exc:
+            return None, f"Не удалось разобрать doc как JSON: {exc}"
+    return doc, None
+
+
 def _draft_id(response: Any) -> str:
     """Best-effort extraction of the new draft id from a save response.
 
@@ -411,6 +428,56 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(
+        name="create_draft_from_gdoc",
+        description=(
+            "Создать черновик статьи на Habr из документа Google Docs (требует "
+            "сохранённого авторского логина — вызови habr_login). Аргумент title — "
+            "заголовок. Аргумент doc — JSON документа Google Docs, как отдаёт "
+            "readDocument(format='json') у google-docs MCP, строкой. Habr ТРЕБУЕТ: "
+            "hubs — минимум один числовой id хаба (резолвьте алиасы через "
+            "resolve_hubs); tags — минимум один тег; flow — обязательный id потока "
+            "(см. list_flows). Аргумент announce — анонс «до ката», 100–3000 "
+            "символов; если не передан, берётся из текста статьи (если получится "
+            "короче 100 символов — будет ошибка). Аргумент format — формат поста "
+            "(по умолчанию 'common'). Возвращает id созданного черновика и "
+            "предупреждения конвертации."
+        ),
+    )
+    async def create_draft_from_gdoc(
+        title: str,
+        doc: str,
+        ctx: Context,
+        hubs: list[str] | None = None,
+        tags: list[str] | None = None,
+        flow: str | None = None,
+        announce: str | None = None,
+        format: str = "common",
+    ) -> str:
+        client, msg = await _ready_client(ctx)
+        if msg:
+            return msg
+        parsed_doc, parse_error = _parse_doc_arg(doc)
+        if parse_error:
+            return parse_error
+        try:
+            result = await client.create_draft_from_gdoc(
+                title,
+                parsed_doc,
+                hubs=hubs,
+                tags=tags,
+                flow=flow,
+                announce=announce,
+                fmt=format,
+            )
+        except HabrApiError as exc:
+            return str(exc)
+        draft_id = _draft_id(result.get("response"))
+        return (
+            f"Черновик создан. id={draft_id}."
+            + _warnings_suffix(result.get("warnings"))
+        )
+
+    @mcp.tool(
         name="get_draft",
         description=(
             "Прочитать черновик/пост Habr по id (требует авторского логина — вызови "
@@ -466,6 +533,61 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 post_id,
                 title=title,
                 docmost_doc=parsed_doc,
+                hubs=hubs,
+                tags=tags,
+                flow=flow,
+                announce=announce,
+                fmt=format,
+            )
+        except HabrApiError as exc:
+            return str(exc)
+        return (
+            f"Черновик {post_id} сохранён."
+            + _warnings_suffix(result.get("warnings"))
+        )
+
+    @mcp.tool(
+        name="update_draft_from_gdoc",
+        description=(
+            "Обновить существующий черновик Habr из документа Google Docs "
+            "(read-modify-write автосейв; требует авторского логина — вызови "
+            "habr_login). Аргумент post_id — id черновика. Все остальные аргументы "
+            "необязательны и перезаписывают соответствующие поля: title, doc (JSON "
+            "документа Google Docs, как отдаёт readDocument(format='json') у "
+            "google-docs MCP, строкой), hubs, tags, flow, format. Аргумент announce "
+            "— анонс «до ката» (100–3000 символов); переопределяет анонс, который "
+            "иначе берётся из текста статьи. Возвращает результат и предупреждения "
+            "конвертации."
+        ),
+    )
+    async def update_draft_from_gdoc(
+        post_id: int,
+        ctx: Context,
+        title: str | None = None,
+        # ``str | dict | None`` (not just ``str``): FastMCP pre-parses an
+        # object-shaped JSON string for an OPTIONAL parameter into a dict before
+        # validation, so the annotation must accept that dict too — otherwise a
+        # valid client payload is rejected at the schema layer.
+        doc: str | dict | None = None,
+        hubs: list[str] | None = None,
+        tags: list[str] | None = None,
+        flow: str | None = None,
+        announce: str | None = None,
+        format: str | None = None,
+    ) -> str:
+        client, msg = await _ready_client(ctx)
+        if msg:
+            return msg
+        parsed_doc = None
+        if doc is not None:
+            parsed_doc, parse_error = _parse_doc_arg(doc)
+            if parse_error:
+                return parse_error
+        try:
+            result = await client.update_draft_from_gdoc(
+                post_id,
+                title=title,
+                gdoc_doc=parsed_doc,
                 hubs=hubs,
                 tags=tags,
                 flow=flow,

@@ -24,6 +24,7 @@ from src.converter import (
     preview_text,
     serialize_source,
 )
+from src.gdoc_converter import gdoc_to_docmost_doc
 from src.settings import Settings
 
 # Base for every endpoint; trailing slash matters for httpx relative URL joins.
@@ -438,6 +439,44 @@ class HabrClient:
         )
         return {"response": result, "warnings": warnings}
 
+    async def create_draft_from_gdoc(
+        self,
+        title: str,
+        gdoc_doc: Any,
+        *,
+        hubs: list[Any] | None = None,
+        tags: list[str] | None = None,
+        flow: Any | None = None,
+        announce: str | None = None,
+        fmt: str = "common",
+        lang: str | None = None,
+        article_type: str = "simple",
+        preview_doc: dict | None = None,
+    ) -> dict[str, Any]:
+        """Create a Habr draft from a Google Docs "Document" (readDocument json).
+
+        Converts the Google Docs JSON to an intermediate Docmost-shaped doc and
+        then delegates to ``create_draft`` (which reuploads images and runs the
+        Docmost->Habr pipeline). Conversion warnings are merged ahead of the
+        pipeline warnings so the caller sees both.
+        """
+        conv_warnings: list[str] = []
+        docmost_doc = gdoc_to_docmost_doc(gdoc_doc, conv_warnings)
+        result = await self.create_draft(
+            title,
+            docmost_doc,
+            hubs=hubs,
+            tags=tags,
+            flow=flow,
+            announce=announce,
+            fmt=fmt,
+            lang=lang,
+            article_type=article_type,
+            preview_doc=preview_doc,
+        )
+        result["warnings"] = conv_warnings + result.get("warnings", [])
+        return result
+
     async def get_draft(self, post_id: int) -> dict[str, Any]:
         """Read a draft/post form via ``publication/post-data/<id>``."""
         return await self._get(
@@ -547,6 +586,46 @@ class HabrClient:
         )
         return {"response": result, "warnings": warnings}
 
+    async def update_draft_from_gdoc(
+        self,
+        post_id: int,
+        *,
+        title: str | None = None,
+        gdoc_doc: Any | None = None,
+        hubs: list[Any] | None = None,
+        tags: list[str] | None = None,
+        flow: Any | None = None,
+        announce: str | None = None,
+        fmt: str | None = None,
+        preview_doc: dict | None = None,
+    ) -> dict[str, Any]:
+        """Update a Habr draft from a Google Docs "Document" (readDocument json).
+
+        The body is converted only when ``gdoc_doc`` is supplied; otherwise the
+        update proceeds without touching ``text`` (same semantics as
+        ``update_draft`` with ``docmost_doc=None``). Conversion warnings are
+        merged ahead of the pipeline warnings.
+        """
+        conv_warnings: list[str] = []
+        docmost_doc = (
+            gdoc_to_docmost_doc(gdoc_doc, conv_warnings)
+            if gdoc_doc is not None
+            else None
+        )
+        result = await self.update_draft(
+            post_id,
+            title=title,
+            docmost_doc=docmost_doc,
+            hubs=hubs,
+            tags=tags,
+            flow=flow,
+            announce=announce,
+            fmt=fmt,
+            preview_doc=preview_doc,
+        )
+        result["warnings"] = conv_warnings + result.get("warnings", [])
+        return result
+
     async def delete_draft(self, post_id: int) -> dict[str, Any]:
         """Delete a draft via ``DELETE articles/drafts/<id>/posts``."""
         return await self._post(
@@ -635,17 +714,30 @@ class HabrClient:
         warnings: list[str] = []
         token = self._settings.docmost_api_token
         base = self._settings.docmost_base_url
+        # ``.hostname`` is lowercased and port-stripped, so the host match is
+        # case-insensitive and ignores an explicit default port (e.g. ":443").
+        base_host = urlsplit(base).hostname if base else None
 
         for src in srcs:
+            # ``is_docmost`` tracks whether the resolved URL targets the Docmost
+            # host, so the Docmost bearer token is sent ONLY there. A relative src
+            # joined with the base is Docmost; an absolute URL is Docmost only when
+            # its host matches the base host. Any other absolute URL (e.g. a Google
+            # contentUri on googleusercontent.com, or any external image) is
+            # downloaded WITHOUT the Authorization header.
             if src.startswith("http://") or src.startswith("https://"):
                 abs_url = src
+                is_docmost = bool(base_host) and urlsplit(src).hostname == base_host
             elif base:
                 abs_url = urljoin(base if base.endswith("/") else base + "/", src.lstrip("/"))
+                is_docmost = True
             else:
                 warnings.append(f"image skipped (no docmost_base_url): {src}")
                 continue
 
-            dl_headers = {"Authorization": f"Bearer {token}"} if token else {}
+            dl_headers = (
+                {"Authorization": f"Bearer {token}"} if token and is_docmost else {}
+            )
             try:
                 resp = await self._client.get(abs_url, headers=dl_headers)
                 resp.raise_for_status()

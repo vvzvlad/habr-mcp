@@ -649,6 +649,261 @@ async def test_update_draft_short_announce_raises_no_save(
     assert not save_route.called
 
 
+# -- author layer: drafts from Google Docs -----------------------------------
+
+
+@respx.mock
+async def test_create_draft_from_gdoc_converts_and_saves(author_settings, gdoc_doc):
+    import json as json_module
+
+    route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "900", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.create_draft_from_gdoc(
+            "Заголовок",
+            gdoc_doc,
+            hubs=[1],
+            tags=["t1"],
+            flow=2,
+            announce="А" * 120,
+        )
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(route.calls.last.request.content)
+    # The Google Docs body was converted all the way through to a Habr source.
+    assert "Привет, Хабр." in body["text"]["source"]
+    assert body["status"] == "drafted"
+    assert result["response"] == {"post": "900", "ok": True}
+    assert result["warnings"] == []
+
+
+@respx.mock
+async def test_create_draft_from_gdoc_merges_conversion_warnings(author_settings):
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    # A monospace paragraph triggers the code-block conversion warning; that
+    # warning must be merged ahead of the (empty) pipeline warnings.
+    gdoc = {
+        "body": {
+            "content": [
+                {
+                    "paragraph": {
+                        "elements": [
+                            {
+                                "textRun": {
+                                    "content": "x" * 60 + "\n",
+                                    "textStyle": {
+                                        "weightedFontFamily": {"fontFamily": "Consolas"}
+                                    },
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    client = HabrClient(author_settings)
+    try:
+        result = await client.create_draft_from_gdoc(
+            "T", gdoc, hubs=[1], tags=["t1"], flow=2, announce="А" * 120
+        )
+    finally:
+        await client.aclose()
+    assert any("code block" in w for w in result["warnings"])
+
+
+@respx.mock
+async def test_update_draft_from_gdoc_converts_body(
+    author_settings, post_data_payload, gdoc_doc
+):
+    import json as json_module
+
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        # Pass an explicit announce so the short converted body does not trip the
+        # 100-char preview floor (the conversion itself is what we assert here).
+        await client.update_draft_from_gdoc(
+            42, gdoc_doc=gdoc_doc, announce="Анонс статьи " * 10
+        )
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(save_route.calls.last.request.content)
+    assert "Привет, Хабр." in body["text"]["source"]
+
+
+@respx.mock
+async def test_update_draft_from_gdoc_without_doc_skips_conversion(
+    author_settings, post_data_payload
+):
+    import json as json_module
+
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        # No gdoc_doc -> the original text source must be preserved untouched.
+        await client.update_draft_from_gdoc(42, title="Новый")
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(save_route.calls.last.request.content)
+    assert body["title"] == "Новый"
+    assert body["text"]["source"] == '{"type":"doc","content":[]}'
+
+
+# -- image reupload auth (Docmost token scoping) -----------------------------
+
+
+def _gdoc_image_doc(src: str) -> dict:
+    """A one-image Docmost doc with an absolute image src (post-conversion shape)."""
+    return {
+        "type": "doc",
+        "content": [{"type": "image", "attrs": {"src": src}}],
+    }
+
+
+@respx.mock
+async def test_reupload_external_image_no_docmost_token(author_settings):
+    # A Google contentUri (googleusercontent.com) must be downloaded WITHOUT the
+    # Docmost bearer token, even when DOCMOST_API_TOKEN is configured.
+    settings = author_settings.model_copy(
+        update={
+            "docmost_base_url": "https://wiki.example.com",
+            "docmost_api_token": "DOCMOST_SECRET",
+        }
+    )
+    google_url = "https://lh3.googleusercontent.com/secret-image"
+    dl_route = respx.get(google_url).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/x"})
+    )
+    client = HabrClient(settings)
+    try:
+        mapping, warnings = await client._reupload_images(_gdoc_image_doc(google_url))
+    finally:
+        await client.aclose()
+
+    assert mapping == {google_url: "https://habrastorage.org/x"}
+    assert warnings == []
+    # The download request must NOT carry the Docmost Authorization header.
+    assert "authorization" not in {
+        k.lower() for k in dl_route.calls.last.request.headers
+    }
+
+
+@respx.mock
+async def test_reupload_relative_docmost_image_gets_token(author_settings):
+    # A relative src (joined with the Docmost base) IS a Docmost-hosted image and
+    # must receive the Docmost bearer token.
+    settings = author_settings.model_copy(
+        update={
+            "docmost_base_url": "https://wiki.example.com",
+            "docmost_api_token": "DOCMOST_SECRET",
+        }
+    )
+    dl_route = respx.get("https://wiki.example.com/api/files/abc.png").mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/y"})
+    )
+    client = HabrClient(settings)
+    try:
+        mapping, _ = await client._reupload_images(
+            _gdoc_image_doc("/api/files/abc.png")
+        )
+    finally:
+        await client.aclose()
+
+    assert mapping == {"/api/files/abc.png": "https://habrastorage.org/y"}
+    assert (
+        dl_route.calls.last.request.headers["authorization"] == "Bearer DOCMOST_SECRET"
+    )
+
+
+@respx.mock
+async def test_reupload_absolute_docmost_host_image_gets_token(author_settings):
+    # An absolute URL whose host == the Docmost base host is Docmost-hosted, so it
+    # must receive the Docmost bearer token.
+    settings = author_settings.model_copy(
+        update={
+            "docmost_base_url": "https://wiki.example.com",
+            "docmost_api_token": "DOCMOST_SECRET",
+        }
+    )
+    same_host = "https://wiki.example.com/files/a.png"
+    dl_route = respx.get(same_host).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/z"})
+    )
+    client = HabrClient(settings)
+    try:
+        await client._reupload_images(_gdoc_image_doc(same_host))
+    finally:
+        await client.aclose()
+
+    assert (
+        dl_route.calls.last.request.headers["authorization"] == "Bearer DOCMOST_SECRET"
+    )
+
+
+@respx.mock
+async def test_reupload_host_match_case_insensitive_and_port_agnostic(author_settings):
+    # Base host differs from the image URL only in letter case AND an explicit
+    # default port. The normalized hostname match must still treat it as Docmost
+    # and attach the bearer token (regression: netloc compare was case/port-strict).
+    settings = author_settings.model_copy(
+        update={
+            "docmost_base_url": "https://Wiki.Example.com",
+            "docmost_api_token": "DOCMOST_SECRET",
+        }
+    )
+    image_url = "https://wiki.example.com:443/files/a.png"
+    dl_route = respx.get(image_url).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/q"})
+    )
+    client = HabrClient(settings)
+    try:
+        await client._reupload_images(_gdoc_image_doc(image_url))
+    finally:
+        await client.aclose()
+
+    assert (
+        dl_route.calls.last.request.headers["authorization"] == "Bearer DOCMOST_SECRET"
+    )
+
+
 # -- fetch_csrf_token --------------------------------------------------------
 
 _CSRF_PROBE_URL = "https://habr.com/ru/feed/"

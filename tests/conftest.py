@@ -62,6 +62,25 @@ def docmost_doc() -> dict:
 
 
 @pytest.fixture
+def gdoc_doc() -> dict:
+    """A tiny image-free Google Docs "Document" with one paragraph."""
+    return {
+        "title": "Doc",
+        "body": {
+            "content": [
+                {
+                    "paragraph": {
+                        "elements": [
+                            {"textRun": {"content": "Привет, Хабр.\n", "textStyle": {}}}
+                        ]
+                    }
+                }
+            ]
+        },
+    }
+
+
+@pytest.fixture
 def post_data_payload() -> dict:
     """A ``post-data`` response with read-side types (hubs ints, editorVersion str)."""
     return {

@@ -19,6 +19,8 @@ tools). It talks to Habr's internal (undocumented) JSON API
   of feeds/articles/comments/drafts).
 - `src/converter.py` — pure Docmost (TipTap) ProseMirror → Habr editorVersion-2
   converter (for the author/draft tools).
+- `src/gdoc_converter.py` — pure Google Docs API "Document" JSON → intermediate
+  Docmost-shaped (TipTap) doc; its output then feeds `src/converter.py`.
 - `src/server.py` — `build_server()`: registers MCP tools (read, write
   comments/votes, the author/draft layer).
 - `tests/` — pytest (httpx is mocked via respx).
@@ -34,15 +36,19 @@ anonymously; write and author tools require a logged-in session and report a
 clear guard message when the caller is not ready.
 
 ## Author layer (drafts)
-`create_draft` / `get_draft` / `update_draft` / `delete_draft` / `resolve_hubs` /
-`list_flows` publish Docmost pages into Habr **drafts** (`publication/…`, protocol
-in `docs/habr-publication-protocol.md`). Promoting a draft to public status
-("Publish") is **NOT implemented** — protocol gap §8. Article bodies are
-converted from Docmost ProseMirror to a Habr editorVersion-2 tree
-(`src/converter.py`). Images are first downloaded from Docmost
-(`DOCMOST_BASE_URL` + `DOCMOST_API_TOKEN`) and re-uploaded to habrastorage; an
-image failure does not abort publication (text goes through, unresolved images
-are dropped with a warning).
+`create_draft` / `create_draft_from_gdoc` / `get_draft` / `update_draft` /
+`update_draft_from_gdoc` / `delete_draft` / `resolve_hubs` / `list_flows` publish
+Docmost pages **and Google Docs documents** into Habr **drafts** (`publication/…`,
+protocol in `docs/habr-publication-protocol.md`). Promoting a draft to public
+status ("Publish") is **NOT implemented** — protocol gap §8. Docmost article
+bodies are converted from Docmost ProseMirror to a Habr editorVersion-2 tree
+(`src/converter.py`); the `*_from_gdoc` tools first convert the Google Docs API
+"Document" JSON to an intermediate Docmost-shaped tree (`src/gdoc_converter.py`)
+and then reuse the same pipeline. Images are first downloaded from their source
+(Docmost-hosted ones get the `DOCMOST_API_TOKEN`; Google `contentUri` and other
+external URLs are fetched WITHOUT it) and re-uploaded to habrastorage; an image
+failure does not abort publication (text goes through, unresolved images are
+dropped with a warning).
 
 ## Setup
 All routine actions go through the `Makefile` — run `make help` to list targets.
