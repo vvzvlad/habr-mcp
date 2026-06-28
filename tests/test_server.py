@@ -590,6 +590,148 @@ async def test_update_draft_from_docmost_tool_saves(seeded_server, post_data_pay
     assert "Черновик 42 сохранён" in out
 
 
+# -- doc as a resource_link --------------------------------------------------
+
+_DOC_LINK_URI = "https://blobs.example.com/page.json"
+
+
+@respx.mock
+async def test_create_draft_from_docmost_accepts_resource_link(seeded_server,
+                                                               docmost_doc):
+    import json as json_module
+
+    # The doc body arrives as an MCP resource_link; habr fetches its uri itself.
+    respx.get(_DOC_LINK_URI).mock(
+        return_value=httpx.Response(200, content=json_module.dumps(docmost_doc).encode())
+    )
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "555", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": {"type": "resource_link", "uri": _DOC_LINK_URI},
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=555" in out
+
+
+@respx.mock
+async def test_create_draft_from_gdoc_accepts_resource_link(seeded_server):
+    import json as json_module
+
+    gdoc = {"body": {"content": [{"paragraph": {"elements": [
+        {"textRun": {"content": "body\n", "textStyle": {}}}]}}]}}
+    respx.get(_DOC_LINK_URI).mock(
+        return_value=httpx.Response(200, content=json_module.dumps(gdoc).encode())
+    )
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "556", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_gdoc",
+            {
+                "title": "T",
+                "doc": {"type": "resource_link", "uri": _DOC_LINK_URI},
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=556" in out
+
+
+@respx.mock
+async def test_update_draft_from_docmost_accepts_resource_link(seeded_server,
+                                                               post_data_payload,
+                                                               docmost_doc):
+    import json as json_module
+
+    respx.get(_DOC_LINK_URI).mock(
+        return_value=httpx.Response(200, content=json_module.dumps(docmost_doc).encode())
+    )
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "update_draft_from_docmost",
+            {
+                "post_id": 42,
+                "doc": {"type": "resource_link", "uri": _DOC_LINK_URI},
+                "announce": "Анонс статьи " * 10,
+            },
+        )
+    )
+    assert "Черновик 42 сохранён" in out
+
+
+@respx.mock
+async def test_update_draft_from_gdoc_accepts_resource_link(seeded_server,
+                                                            post_data_payload):
+    import json as json_module
+
+    gdoc = {"body": {"content": [{"paragraph": {"elements": [
+        {"textRun": {"content": "new\n", "textStyle": {}}}]}}]}}
+    respx.get(_DOC_LINK_URI).mock(
+        return_value=httpx.Response(200, content=json_module.dumps(gdoc).encode())
+    )
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "update_draft_from_gdoc",
+            {
+                "post_id": 42,
+                "doc": {"type": "resource_link", "uri": _DOC_LINK_URI},
+                "announce": "Анонс статьи " * 10,
+            },
+        )
+    )
+    assert "Черновик 42 сохранён" in out
+
+
+@respx.mock
+async def test_create_draft_from_docmost_resource_link_fetch_error(seeded_server):
+    # A failed body-link fetch returns a Russian error; no draft is created.
+    respx.get(_DOC_LINK_URI).mock(return_value=httpx.Response(500))
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "x", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": {"type": "resource_link", "uri": _DOC_LINK_URI},
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "Не удалось загрузить ресурс" in out
+    assert not save_route.called
+
+
 def test_draft_id_reads_post_key():
     from src.server import _draft_id
 
