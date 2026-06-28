@@ -25,7 +25,12 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from src.client import HabrApiError, HabrClient, fetch_csrf_token
+from src.client import (
+    HabrApiError,
+    HabrClient,
+    fetch_csrf_token,
+    resource_link_uri,
+)
 from src.formatting import (
     format_article,
     format_article_list,
@@ -149,18 +154,40 @@ def _warnings_suffix(warnings: list[str] | None) -> str:
 def _parse_doc_arg(doc: Any) -> tuple[Any, str | None]:
     """Parse a tool's ``doc`` argument into a Python value.
 
-    Returns ``(parsed, error)``. A JSON string is decoded; a value that is
-    already a dict/list is returned as-is. FastMCP pre-parses object-shaped JSON
-    strings for OPTIONAL (``str | None``) parameters into dicts before the tool
-    runs, so a dict must be accepted here too — otherwise a valid client payload
-    would be rejected. ``error`` is a Russian message when decoding fails.
+    Returns ``(parsed, error)``. A JSON string (or ``bytes`` fetched from a
+    ``resource_link``) is decoded; a value that is already a dict/list is
+    returned as-is. FastMCP pre-parses object-shaped JSON strings for OPTIONAL
+    (``str | None``) parameters into dicts before the tool runs, so a dict must
+    be accepted here too — otherwise a valid client payload would be rejected.
+    ``error`` is a Russian message when decoding fails.
     """
-    if isinstance(doc, str):
+    if isinstance(doc, (str, bytes)):
         try:
             return json.loads(doc), None
         except (ValueError, TypeError) as exc:
             return None, f"Не удалось разобрать doc как JSON: {exc}"
     return doc, None
+
+
+async def _resolve_doc_arg(
+    client: HabrClient, doc: Any
+) -> tuple[Any, str | None]:
+    """Resolve a tool's ``doc`` argument, expanding an MCP ``resource_link``.
+
+    If ``doc`` is a ``resource_link``, its ``uri`` is fetched over HTTP (or
+    decoded from a ``data:`` URI) and the bytes are parsed as JSON. Otherwise the
+    inline value is parsed as today. Returns ``(parsed, error)`` where ``error``
+    is a Russian message on a fetch or decode failure. A plain inline JSON string
+    is NEVER treated as a URL — only an actual ``resource_link`` triggers a fetch.
+    """
+    uri = resource_link_uri(doc)
+    if uri is not None:
+        try:
+            raw, _ = await client.fetch_resource(uri)
+        except HabrApiError as exc:
+            return None, str(exc)
+        return _parse_doc_arg(raw)
+    return _parse_doc_arg(doc)
 
 
 def _draft_id(response: Any) -> str:
@@ -401,7 +428,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Создать черновик статьи на Habr из страницы Docmost (требует "
             "сохранённого авторского логина — вызови habr_login). Аргумент title — "
             "заголовок. Аргумент doc — ProseMirror-JSON документа Docmost (как "
-            "отдаёт get_page_json), строкой. Habr ТРЕБУЕТ: hubs — минимум один "
+            "отдаёт get_page_json), строкой ЛИБО MCP resource_link на этот JSON "
+            "(habr сам скачает его по uri). Habr ТРЕБУЕТ: hubs — минимум один "
             "числовой id хаба (резолвьте алиасы через resolve_hubs); tags — минимум "
             "один тег; flow — обязательный id потока (см. list_flows). Аргумент "
             "announce — ОБЯЗАТЕЛЬНЫЙ анонс «до ката» (100–3000 символов), отдельный "
@@ -423,7 +451,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         client, msg = await _ready_client(ctx)
         if msg:
             return msg
-        parsed_doc, parse_error = _parse_doc_arg(doc)
+        parsed_doc, parse_error = await _resolve_doc_arg(client, doc)
         if parse_error:
             return parse_error
         try:
@@ -450,8 +478,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Создать черновик статьи на Habr из документа Google Docs (требует "
             "сохранённого авторского логина — вызови habr_login). Аргумент title — "
             "заголовок. Аргумент doc — JSON документа Google Docs, как отдаёт "
-            "readDocument(format='json') у google-docs MCP, строкой. Habr ТРЕБУЕТ: "
-            "hubs — минимум один числовой id хаба (резолвьте алиасы через "
+            "readDocument(format='json') у google-docs MCP, строкой ЛИБО MCP "
+            "resource_link на этот JSON (habr сам скачает его по uri). Habr "
+            "ТРЕБУЕТ: hubs — минимум один числовой id хаба (резолвьте алиасы через "
             "resolve_hubs); tags — минимум один тег; flow — обязательный id потока "
             "(см. list_flows). Аргумент announce — ОБЯЗАТЕЛЬНЫЙ анонс «до ката» "
             "(100–3000 символов), отдельный текст-тизер, который вы пишете сами (НЕ "
@@ -462,7 +491,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     )
     async def create_draft_from_gdoc(
         title: str,
-        doc: str,
+        doc: str | dict,
         ctx: Context,
         hubs: list[str] | None = None,
         tags: list[str] | None = None,
@@ -473,7 +502,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         client, msg = await _ready_client(ctx)
         if msg:
             return msg
-        parsed_doc, parse_error = _parse_doc_arg(doc)
+        parsed_doc, parse_error = await _resolve_doc_arg(client, doc)
         if parse_error:
             return parse_error
         try:
@@ -540,7 +569,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "требует авторского логина — вызови habr_login). Аргумент post_id — id "
             "черновика. Все остальные аргументы необязательны и перезаписывают "
             "соответствующие поля: title, doc (ProseMirror-JSON страницы Docmost "
-            "строкой, как get_page_json), hubs, tags, flow, format. Аргумент "
+            "строкой, как get_page_json, ЛИБО MCP resource_link на этот JSON — "
+            "habr сам скачает его по uri), hubs, tags, flow, format. Аргумент "
             "announce — анонс «до ката» (100–3000), отдельный текст; если передан "
             "— заменяет текущий анонс, иначе анонс не меняется. Возвращает "
             "результат и предупреждения конвертации."
@@ -566,7 +596,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return msg
         parsed_doc = None
         if doc is not None:
-            parsed_doc, parse_error = _parse_doc_arg(doc)
+            parsed_doc, parse_error = await _resolve_doc_arg(client, doc)
             if parse_error:
                 return parse_error
         try:
@@ -595,7 +625,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "habr_login). Аргумент post_id — id черновика. Все остальные аргументы "
             "необязательны и перезаписывают соответствующие поля: title, doc (JSON "
             "документа Google Docs, как отдаёт readDocument(format='json') у "
-            "google-docs MCP, строкой), hubs, tags, flow, format. Аргумент announce "
+            "google-docs MCP, строкой, ЛИБО MCP resource_link на этот JSON — habr "
+            "сам скачает его по uri), hubs, tags, flow, format. Аргумент announce "
             "— анонс «до ката» (100–3000), отдельный текст; если передан — заменяет "
             "текущий анонс, иначе анонс не меняется. Возвращает результат и "
             "предупреждения конвертации."
@@ -621,7 +652,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return msg
         parsed_doc = None
         if doc is not None:
-            parsed_doc, parse_error = _parse_doc_arg(doc)
+            parsed_doc, parse_error = await _resolve_doc_arg(client, doc)
             if parse_error:
                 return parse_error
         try:

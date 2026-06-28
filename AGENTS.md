@@ -45,11 +45,13 @@ status ("Publish") is **NOT implemented** — protocol gap §8. Docmost article
 bodies are converted from Docmost ProseMirror to a Habr editorVersion-2 tree
 (`src/converter.py`); the `*_from_gdoc` tools first convert the Google Docs API
 "Document" JSON to an intermediate Docmost-shaped tree (`src/gdoc_converter.py`)
-and then reuse the same pipeline. Images are first downloaded from their source
-(Docmost-hosted ones get the `DOCMOST_API_TOKEN`; Google `contentUri` and other
-external URLs are fetched WITHOUT it) and re-uploaded to habrastorage; an image
-failure does not abort publication (text goes through, unresolved images are
-dropped with a warning).
+and then reuse the same pipeline. Each image `attrs.src` may be a plain `http(s)`
+URL, a `data:` URI, or an MCP `resource_link`; habr resolves it to bytes via
+`HabrClient.fetch_resource` (HTTP GET with **no** Authorization header, or a
+local `data:` decode) and re-uploads them to habrastorage. There is no Docmost
+token — the producer hands habr a fetchable URL / data-URI / resource_link. An
+image failure does not abort publication (text goes through, unresolved images
+are dropped with a warning).
 
 ## Setup
 All routine actions go through the `Makefile` — run `make help` to list targets.

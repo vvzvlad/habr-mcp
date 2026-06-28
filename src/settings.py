@@ -54,10 +54,6 @@ class Settings(BaseSettings):
     habr_user_uuid: str | None = None
     # Value for the `x-app-version` request header (Habr frontend version).
     habr_x_app_version: str = "2.329.0"
-    # Base URL to resolve & download Docmost image attachments (image reupload only).
-    docmost_base_url: str | None = None
-    # Bearer token to download Docmost attachments (image reupload only).
-    docmost_api_token: str | None = None
     # httpx request timeout in seconds.
     request_timeout: float = 20.0
     # Optional HTTP/SOCKS proxy URL passed straight to httpx.

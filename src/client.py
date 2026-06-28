@@ -9,10 +9,15 @@ per-user by the registry from credentials stored via the ``habr_login`` tool
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
+import hashlib
 import html as html_module
 import re
 import secrets
-from urllib.parse import urljoin, urlsplit
+from os.path import splitext
+from urllib.parse import unquote_to_bytes, urlsplit
 from typing import Any
 
 import httpx
@@ -20,6 +25,7 @@ import httpx
 from src.converter import (
     collect_image_srcs,
     docmost_to_habr_doc,
+    image_src_key,
     make_preview_doc,
     serialize_source,
 )
@@ -88,6 +94,83 @@ _MAX_PREVIEW_CHARS = 3000
 
 class HabrApiError(Exception):
     """Raised for any Habr API failure (HTTP error dict, bad body, transport)."""
+
+
+# Pattern for an ETag that looks like a bare sha256 hex digest. The gitmost
+# sandbox sends ``ETag: "<sha256hex>"`` for its blobs so habr can verify
+# integrity; opaque CDN validators do NOT match and are never verified.
+_SHA256_ETAG_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+# Image content type -> filename extension. Used to derive an upload filename
+# when the source URL has no usable extension (e.g. sandbox blobs served at
+# ``/api/sb/<uuid>`` with a correct Content-Type but no extension).
+_IMAGE_EXT_BY_CONTENT_TYPE = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+    "image/avif": ".avif",
+}
+
+
+def resource_link_uri(v: Any) -> str | None:
+    """Return the ``uri`` of an MCP ``resource_link`` value, else None.
+
+    A value is a link iff it is a dict with ``type == "resource_link"`` carrying
+    a non-empty string ``uri``. A Docmost ProseMirror doc is also a dict but its
+    ``type`` is ``"doc"``, so it is never mistaken for a link.
+    """
+    if isinstance(v, dict) and v.get("type") == "resource_link":
+        uri = v.get("uri")
+        if isinstance(uri, str) and uri:
+            return uri
+    return None
+
+
+def _decode_data_uri(uri: str) -> tuple[bytes, str | None]:
+    """Decode a ``data:[<mediatype>][;base64],<payload>`` URI to (bytes, media).
+
+    Base64-decodes when ``;base64`` is present, otherwise percent-decodes the
+    payload. Returns the bytes plus the declared media type (or None). Raises
+    ``HabrApiError`` (Russian message) on a malformed data URI.
+    """
+    rest = uri[len("data:"):]
+    if "," not in rest:
+        raise HabrApiError("Некорректный data: URI (нет запятой-разделителя).")
+    meta, payload = rest.split(",", 1)
+    params = meta.split(";") if meta else []
+    is_base64 = params and params[-1].strip().lower() == "base64"
+    media_type = params[0].strip() if params and params[0].strip() else None
+    if is_base64:
+        try:
+            data = base64.b64decode(payload, validate=False)
+        except (binascii.Error, ValueError) as exc:
+            raise HabrApiError(f"Некорректный data: URI (base64): {exc}") from exc
+    else:
+        try:
+            data = unquote_to_bytes(payload)
+        except (ValueError, TypeError) as exc:
+            raise HabrApiError(f"Некорректный data: URI: {exc}") from exc
+    return data, media_type
+
+
+def _upload_filename(uri: str, content_type: str | None) -> str:
+    """Derive an upload filename for an image fetched from ``uri``.
+
+    Keeps the URL path's own filename when it already has a real extension.
+    Otherwise (e.g. a sandbox blob at ``/api/sb/<uuid>`` or a ``data:`` URI)
+    derives the extension from the content type via ``_IMAGE_EXT_BY_CONTENT_TYPE``;
+    falls back to ``image.png`` when the type is unknown.
+    """
+    if not uri.startswith("data:"):
+        path = urlsplit(uri).path
+        name = path.rsplit("/", 1)[-1]
+        stem, ext = splitext(name)
+        if stem and ext:
+            return name
+    ext = _IMAGE_EXT_BY_CONTENT_TYPE.get((content_type or "").lower())
+    return f"image{ext}" if ext else "image.png"
 
 
 def _validate_announce_length(text: str) -> None:
@@ -813,61 +896,91 @@ class HabrClient:
         match = _HABRASTORAGE_RE.search(response.text or "")
         return match.group(0) if match else None
 
+    async def fetch_resource(self, uri: str) -> tuple[bytes, str | None]:
+        """Resolve a ``data:`` URI or ``http(s)`` URL to ``(bytes, content_type)``.
+
+        ``data:`` URIs are decoded locally (no network); the content type is the
+        declared media type (e.g. ``image/jpeg``) or None when absent. ``http(s)``
+        URLs are fetched with a plain GET — NO Authorization header is ever sent;
+        the content type is the response ``Content-Type`` (normalized to the part
+        before ``;``, stripped and lowercased) or None when absent. The habr
+        proxy/timeout/UA are reused (mirrors ``fetch_csrf_token``). When the
+        ``ETag`` response header is a bare sha256 hex digest the body is verified
+        against it (this guards the gitmost sandbox blobs, which send
+        ``ETag: "<sha256hex>"``); any other / absent ETag is left unverified so
+        external images with opaque CDN validators keep working. Raises
+        ``HabrApiError`` (Russian message) on a malformed data URI, a transport
+        error, or a sha256 mismatch.
+        """
+        if uri.startswith("data:"):
+            data, media = _decode_data_uri(uri)
+            return data, media
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._settings.request_timeout,
+                proxy=self._settings.proxy or None,
+                headers={"User-Agent": self._settings.user_agent},
+            ) as client:
+                response = await client.get(uri)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HabrApiError(f"Не удалось загрузить ресурс {uri}: {exc}") from exc
+        body = response.content
+        etag = (response.headers.get("ETag") or "").strip()
+        if etag.startswith("W/"):
+            etag = etag[2:].strip()
+        etag = etag.strip('"')
+        if _SHA256_ETAG_RE.match(etag):
+            actual = hashlib.sha256(body).hexdigest()
+            if actual.lower() != etag.lower():
+                raise HabrApiError(
+                    f"Целостность ресурса нарушена: {uri} (повреждённый или "
+                    "обрезанный blob, sha256 не совпал с ETag)."
+                )
+        raw_ct = response.headers.get("Content-Type")
+        content_type = raw_ct.split(";", 1)[0].strip().lower() if raw_ct else None
+        return body, (content_type or None)
+
     async def _reupload_images(
         self, docmost_doc: dict
     ) -> tuple[dict[str, str], list[str]]:
-        """Download every Docmost image and reupload it to habrastorage.
+        """Fetch every image source and reupload it to habrastorage.
 
-        Returns ``(src -> habrastorage_url, warnings)``. Never raises: image
-        problems must not abort publishing (the text still goes through and the
-        converter drops images that have no mapped URL).
+        Returns ``(image_src_key -> habrastorage_url, warnings)``. Never raises:
+        image problems must not abort publishing (the text still goes through and
+        the converter drops images that have no mapped URL). Each ``attrs.src``
+        may be a plain http(s) URL string, a ``data:`` URI string, or an MCP
+        ``resource_link`` dict; all are resolved through ``fetch_resource`` with
+        NO credentials. Sandbox source links are ephemeral (~1h TTL), so all
+        bytes are fetched up front and concurrently before any upload.
         """
         srcs = collect_image_srcs(docmost_doc)
         mapping: dict[str, str] = {}
         warnings: list[str] = []
-        token = self._settings.docmost_api_token
-        base = self._settings.docmost_base_url
-        # ``.hostname`` is lowercased and port-stripped, so the host match is
-        # case-insensitive and ignores an explicit default port (e.g. ":443").
-        base_host = urlsplit(base).hostname if base else None
+        if not srcs:
+            return mapping, warnings
 
-        for src in srcs:
-            # ``is_docmost`` tracks whether the resolved URL targets the Docmost
-            # host, so the Docmost bearer token is sent ONLY there. A relative src
-            # joined with the base is Docmost; an absolute URL is Docmost only when
-            # its host matches the base host. Any other absolute URL (e.g. a Google
-            # contentUri on googleusercontent.com, or any external image) is
-            # downloaded WITHOUT the Authorization header.
-            if src.startswith("http://") or src.startswith("https://"):
-                abs_url = src
-                is_docmost = bool(base_host) and urlsplit(src).hostname == base_host
-            elif base:
-                abs_url = urljoin(base if base.endswith("/") else base + "/", src.lstrip("/"))
-                is_docmost = True
-            else:
-                warnings.append(f"image skipped (no docmost_base_url): {src}")
+        # Phase 1: fetch ALL image bytes concurrently, up front.
+        fetch_uris = [resource_link_uri(src) or src for src in srcs]
+        results = await asyncio.gather(
+            *(self.fetch_resource(uri) for uri in fetch_uris),
+            return_exceptions=True,
+        )
+
+        # Phase 2: upload each successfully fetched blob to habrastorage.
+        for src, uri, result in zip(srcs, fetch_uris, results):
+            if isinstance(result, BaseException):
+                warnings.append(f"image fetch failed: {uri} ({result})")
                 continue
+            data, fetched_ct = result
+            content_type = fetched_ct or "application/octet-stream"
+            filename = _upload_filename(uri, fetched_ct)
 
-            dl_headers = (
-                {"Authorization": f"Bearer {token}"} if token and is_docmost else {}
-            )
-            try:
-                resp = await self._client.get(abs_url, headers=dl_headers)
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                warnings.append(f"image download failed: {src} ({exc})")
-                continue
-
-            path = urlsplit(abs_url).path
-            filename = path.rsplit("/", 1)[-1] or "image.png"
-            content_type = resp.headers.get("content-type") or "application/octet-stream"
-            content_type = content_type.split(";", 1)[0].strip()
-
-            new_url = await self.upload_image(resp.content, filename, content_type)
+            new_url = await self.upload_image(data, filename, content_type)
             if new_url:
-                mapping[src] = new_url
+                mapping[image_src_key(src)] = new_url
             else:
-                warnings.append(f"image upload failed: {src}")
+                warnings.append(f"image upload failed: {uri}")
 
         return mapping, warnings
 

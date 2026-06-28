@@ -13,6 +13,7 @@ from src.client import (
     HabrClient,
     _cookie_interface_lang,
     fetch_csrf_token,
+    resource_link_uri,
 )
 
 BASE_URL = "https://habr.com/kek/v2/"
@@ -932,11 +933,161 @@ async def test_update_draft_from_gdoc_without_doc_skips_conversion(
     assert body["text"]["source"] == '{"type":"doc","content":[]}'
 
 
-# -- image reupload auth (Docmost token scoping) -----------------------------
+# -- resource_link_uri -------------------------------------------------------
 
 
-def _gdoc_image_doc(src: str) -> dict:
-    """A one-image Docmost doc with an absolute image src (post-conversion shape)."""
+def test_resource_link_uri_detects_link():
+    assert (
+        resource_link_uri({"type": "resource_link", "uri": "https://x/y.json"})
+        == "https://x/y.json"
+    )
+
+
+def test_resource_link_uri_rejects_non_link():
+    # A ProseMirror doc is a dict but its type is "doc", never a link.
+    assert resource_link_uri({"type": "doc", "content": []}) is None
+    assert resource_link_uri("https://x/y.png") is None
+    assert resource_link_uri({"type": "resource_link", "uri": ""}) is None
+    assert resource_link_uri({"type": "resource_link"}) is None
+
+
+# -- fetch_resource ----------------------------------------------------------
+
+_RES_URL = "https://blobs.example.com/abc.json"
+
+
+@respx.mock
+async def test_fetch_resource_http_ok_no_auth(anon_settings):
+    # http(s) returns (bytes, normalized Content-Type) and sends no auth header.
+    route = respx.get(_RES_URL).mock(
+        return_value=httpx.Response(
+            200, content=b"hello", headers={"Content-Type": "image/PNG; charset=x"}
+        )
+    )
+    client = HabrClient(anon_settings)
+    try:
+        body, content_type = await client.fetch_resource(_RES_URL)
+    finally:
+        await client.aclose()
+    assert body == b"hello"
+    assert content_type == "image/png"
+    # No Authorization header is ever sent.
+    assert "authorization" not in {
+        k.lower() for k in route.calls.last.request.headers
+    }
+
+
+@respx.mock
+async def test_fetch_resource_http_no_content_type_is_none(anon_settings):
+    respx.get(_RES_URL).mock(return_value=httpx.Response(200, content=b"x"))
+    client = HabrClient(anon_settings)
+    try:
+        body, content_type = await client.fetch_resource(_RES_URL)
+    finally:
+        await client.aclose()
+    assert body == b"x"
+    assert content_type is None
+
+
+@respx.mock
+async def test_fetch_resource_http_etag_sha256_match_ok(anon_settings):
+    import hashlib
+
+    body = b"sandbox blob"
+    digest = hashlib.sha256(body).hexdigest()
+    respx.get(_RES_URL).mock(
+        return_value=httpx.Response(200, content=body, headers={"ETag": f'"{digest}"'})
+    )
+    client = HabrClient(anon_settings)
+    try:
+        got, _ = await client.fetch_resource(_RES_URL)
+    finally:
+        await client.aclose()
+    assert got == body
+
+
+@respx.mock
+async def test_fetch_resource_http_etag_sha256_mismatch_raises(anon_settings):
+    # A 64-hex ETag that does NOT match the body sha256 means a corrupted blob.
+    bad_digest = "0" * 64
+    respx.get(_RES_URL).mock(
+        return_value=httpx.Response(
+            200, content=b"truncated", headers={"ETag": f'W/"{bad_digest}"'}
+        )
+    )
+    client = HabrClient(anon_settings)
+    try:
+        with pytest.raises(HabrApiError):
+            await client.fetch_resource(_RES_URL)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_fetch_resource_http_opaque_etag_not_verified(anon_settings):
+    # An opaque (non-sha256) CDN validator must NOT trigger verification.
+    respx.get(_RES_URL).mock(
+        return_value=httpx.Response(
+            200, content=b"external image", headers={"ETag": '"686897696a7c876b7e"'}
+        )
+    )
+    client = HabrClient(anon_settings)
+    try:
+        got, _ = await client.fetch_resource(_RES_URL)
+    finally:
+        await client.aclose()
+    assert got == b"external image"
+
+
+async def test_fetch_resource_data_uri_base64_ok(anon_settings):
+    import base64
+
+    payload = base64.b64encode(b"\x89PNG-bytes").decode()
+    client = HabrClient(anon_settings)
+    try:
+        body, content_type = await client.fetch_resource(f"data:image/png;base64,{payload}")
+    finally:
+        await client.aclose()
+    assert body == b"\x89PNG-bytes"
+    assert content_type == "image/png"
+
+
+async def test_fetch_resource_data_uri_percent_ok(anon_settings):
+    client = HabrClient(anon_settings)
+    try:
+        body, content_type = await client.fetch_resource("data:text/plain,hello%20world")
+    finally:
+        await client.aclose()
+    assert body == b"hello world"
+    assert content_type == "text/plain"
+
+
+async def test_fetch_resource_malformed_data_uri_raises(anon_settings):
+    client = HabrClient(anon_settings)
+    try:
+        with pytest.raises(HabrApiError):
+            # No comma separator -> malformed.
+            await client.fetch_resource("data:image/png;base64")
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_fetch_resource_network_error_raises(anon_settings):
+    respx.get(_RES_URL).mock(side_effect=httpx.ConnectError("boom"))
+    client = HabrClient(anon_settings)
+    try:
+        with pytest.raises(HabrApiError):
+            await client.fetch_resource(_RES_URL)
+    finally:
+        await client.aclose()
+
+
+# -- image reupload (resolver, no Docmost token) -----------------------------
+
+
+def _image_doc(src) -> dict:
+    """A one-image Docmost doc; ``src`` may be a str URL/data-URI or a dict link."""
     return {
         "type": "doc",
         "content": [{"type": "image", "attrs": {"src": src}}],
@@ -944,17 +1095,10 @@ def _gdoc_image_doc(src: str) -> dict:
 
 
 @respx.mock
-async def test_reupload_external_image_no_docmost_token(author_settings):
-    # A Google contentUri (googleusercontent.com) must be downloaded WITHOUT the
-    # Docmost bearer token, even when DOCMOST_API_TOKEN is configured.
-    settings = author_settings.model_copy(
-        update={
-            "docmost_base_url": "https://wiki.example.com",
-            "docmost_api_token": "DOCMOST_SECRET",
-        }
-    )
-    google_url = "https://lh3.googleusercontent.com/secret-image"
-    dl_route = respx.get(google_url).mock(
+async def test_reupload_plain_http_url_no_auth(author_settings):
+    # A plain http(s) URL src is fetched with NO Authorization header.
+    image_url = "https://cdn.example.com/img/abc.png"
+    dl_route = respx.get(image_url).mock(
         return_value=httpx.Response(
             200, content=b"img", headers={"content-type": "image/png"}
         )
@@ -962,31 +1106,25 @@ async def test_reupload_external_image_no_docmost_token(author_settings):
     respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, json={"url": "https://habrastorage.org/x"})
     )
-    client = HabrClient(settings)
+    client = HabrClient(author_settings)
     try:
-        mapping, warnings = await client._reupload_images(_gdoc_image_doc(google_url))
+        mapping, warnings = await client._reupload_images(_image_doc(image_url))
     finally:
         await client.aclose()
 
-    assert mapping == {google_url: "https://habrastorage.org/x"}
+    assert mapping == {image_url: "https://habrastorage.org/x"}
     assert warnings == []
-    # The download request must NOT carry the Docmost Authorization header.
     assert "authorization" not in {
         k.lower() for k in dl_route.calls.last.request.headers
     }
 
 
 @respx.mock
-async def test_reupload_relative_docmost_image_gets_token(author_settings):
-    # A relative src (joined with the Docmost base) IS a Docmost-hosted image and
-    # must receive the Docmost bearer token.
-    settings = author_settings.model_copy(
-        update={
-            "docmost_base_url": "https://wiki.example.com",
-            "docmost_api_token": "DOCMOST_SECRET",
-        }
-    )
-    dl_route = respx.get("https://wiki.example.com/api/files/abc.png").mock(
+async def test_reupload_resource_link_src_fetched_from_uri(author_settings):
+    # A resource_link dict src is fetched from its uri and keyed by that uri.
+    uri = "https://blobs.example.com/img/xyz.png"
+    src = {"type": "resource_link", "uri": uri, "mimeType": "image/png"}
+    respx.get(uri).mock(
         return_value=httpx.Response(
             200, content=b"img", headers={"content-type": "image/png"}
         )
@@ -994,79 +1132,103 @@ async def test_reupload_relative_docmost_image_gets_token(author_settings):
     respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, json={"url": "https://habrastorage.org/y"})
     )
-    client = HabrClient(settings)
+    client = HabrClient(author_settings)
     try:
-        mapping, _ = await client._reupload_images(
-            _gdoc_image_doc("/api/files/abc.png")
-        )
+        mapping, warnings = await client._reupload_images(_image_doc(src))
     finally:
         await client.aclose()
 
-    assert mapping == {"/api/files/abc.png": "https://habrastorage.org/y"}
-    assert (
-        dl_route.calls.last.request.headers["authorization"] == "Bearer DOCMOST_SECRET"
-    )
+    assert mapping == {uri: "https://habrastorage.org/y"}
+    assert warnings == []
 
 
 @respx.mock
-async def test_reupload_absolute_docmost_host_image_gets_token(author_settings):
-    # An absolute URL whose host == the Docmost base host is Docmost-hosted, so it
-    # must receive the Docmost bearer token.
-    settings = author_settings.model_copy(
-        update={
-            "docmost_base_url": "https://wiki.example.com",
-            "docmost_api_token": "DOCMOST_SECRET",
-        }
-    )
-    same_host = "https://wiki.example.com/files/a.png"
-    dl_route = respx.get(same_host).mock(
-        return_value=httpx.Response(
-            200, content=b"img", headers={"content-type": "image/png"}
-        )
-    )
-    respx.post(f"{BASE_URL}publication/upload").mock(
+async def test_reupload_data_uri_src_decoded_locally(author_settings):
+    # A data: URI src is decoded locally (no network) and uploaded.
+    import base64
+
+    payload = base64.b64encode(b"raw-png").decode()
+    src = f"data:image/png;base64,{payload}"
+    upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, json={"url": "https://habrastorage.org/z"})
     )
-    client = HabrClient(settings)
+    client = HabrClient(author_settings)
     try:
-        await client._reupload_images(_gdoc_image_doc(same_host))
+        mapping, warnings = await client._reupload_images(_image_doc(src))
     finally:
         await client.aclose()
 
-    assert (
-        dl_route.calls.last.request.headers["authorization"] == "Bearer DOCMOST_SECRET"
-    )
+    assert mapping == {src: "https://habrastorage.org/z"}
+    assert warnings == []
+    # The bytes posted to habrastorage are the decoded payload, content-type png.
+    sent = upload_route.calls.last.request
+    assert b"raw-png" in sent.content
+    assert b"image/png" in sent.content
+    assert b'filename="image.png"' in sent.content
 
 
 @respx.mock
-async def test_reupload_host_match_case_insensitive_and_port_agnostic(author_settings):
-    # Base host differs from the image URL only in letter case AND an explicit
-    # default port. The normalized hostname match must still treat it as Docmost
-    # and attach the bearer token (regression: netloc compare was case/port-strict).
-    settings = author_settings.model_copy(
-        update={
-            "docmost_base_url": "https://Wiki.Example.com",
-            "docmost_api_token": "DOCMOST_SECRET",
-        }
-    )
-    image_url = "https://wiki.example.com:443/files/a.png"
-    dl_route = respx.get(image_url).mock(
+async def test_reupload_extensionless_url_uses_content_type(author_settings):
+    # Sandbox-style blob: extensionless URL but a correct Content-Type header.
+    # The upload must carry that content type and a .png filename derived from it.
+    image_url = "https://sandbox.example.com/api/sb/3f2a-uuid"
+    respx.get(image_url).mock(
         return_value=httpx.Response(
-            200, content=b"img", headers={"content-type": "image/png"}
+            200, content=b"img", headers={"Content-Type": "image/png"}
         )
     )
-    respx.post(f"{BASE_URL}publication/upload").mock(
-        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/q"})
+    upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/sb"})
     )
-    client = HabrClient(settings)
+    client = HabrClient(author_settings)
     try:
-        await client._reupload_images(_gdoc_image_doc(image_url))
+        mapping, warnings = await client._reupload_images(_image_doc(image_url))
     finally:
         await client.aclose()
 
-    assert (
-        dl_route.calls.last.request.headers["authorization"] == "Bearer DOCMOST_SECRET"
+    assert mapping == {image_url: "https://habrastorage.org/sb"}
+    assert warnings == []
+    sent = upload_route.calls.last.request
+    assert b"image/png" in sent.content
+    assert b'filename="image.png"' in sent.content
+
+
+@respx.mock
+async def test_reupload_data_uri_jpeg_uses_jpg_filename(author_settings):
+    # data:image/jpeg must upload as image/jpeg with a .jpg filename (not .png).
+    import base64
+
+    payload = base64.b64encode(b"jpeg-bytes").decode()
+    src = f"data:image/jpeg;base64,{payload}"
+    upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/j"})
     )
+    client = HabrClient(author_settings)
+    try:
+        mapping, warnings = await client._reupload_images(_image_doc(src))
+    finally:
+        await client.aclose()
+
+    assert mapping == {src: "https://habrastorage.org/j"}
+    assert warnings == []
+    sent = upload_route.calls.last.request
+    assert b"image/jpeg" in sent.content
+    assert b'filename="image.jpg"' in sent.content
+
+
+@respx.mock
+async def test_reupload_fetch_failure_skips_with_warning(author_settings):
+    # A failing fetch must NOT abort publishing: skip with a warning.
+    image_url = "https://cdn.example.com/img/broken.png"
+    respx.get(image_url).mock(return_value=httpx.Response(404))
+    client = HabrClient(author_settings)
+    try:
+        mapping, warnings = await client._reupload_images(_image_doc(image_url))
+    finally:
+        await client.aclose()
+
+    assert mapping == {}
+    assert warnings and "image fetch failed" in warnings[0]
 
 
 # -- fetch_csrf_token --------------------------------------------------------

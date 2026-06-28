@@ -160,13 +160,32 @@ def _warn_once(warnings: list[str] | None, seen: set[str], message: str) -> None
 # --- Public API: image collection -------------------------------------------
 
 
-def collect_image_srcs(docmost_doc: dict) -> list[str]:
-    """De-duplicated list of ``attrs.src`` for every Docmost ``image`` node.
+def image_src_key(src: Any) -> str | None:
+    """Canonical map key for an image ``attrs.src``.
 
-    Returned in document order. Empty/missing ``src`` values are skipped.
+    ``src`` may be a plain URL/data-URI string or an MCP ``resource_link`` dict
+    (``{"type": "resource_link", "uri": ...}``). Returns the string itself when
+    it is a non-empty str, the ``uri`` when it is such a resource_link, else None.
+    """
+    if isinstance(src, str):
+        return src if src else None
+    if isinstance(src, dict) and src.get("type") == "resource_link":
+        uri = src.get("uri")
+        if isinstance(uri, str) and uri:
+            return uri
+    return None
+
+
+def collect_image_srcs(docmost_doc: dict) -> list[Any]:
+    """De-duplicated original ``attrs.src`` VALUES for every Docmost ``image``.
+
+    Each value is returned as-is (a str URL/data-URI OR a ``resource_link`` dict)
+    in document order, de-duplicated by ``image_src_key``. Values whose key is
+    None (empty/missing/unsupported src) are skipped. Only ``_reupload_images``
+    consumes this.
     """
     doc = _as_doc(docmost_doc)
-    srcs: list[str] = []
+    srcs: list[Any] = []
     seen: set[str] = set()
 
     def visit(node: Any) -> None:
@@ -174,8 +193,9 @@ def collect_image_srcs(docmost_doc: dict) -> list[str]:
             return
         if node.get("type") == "image":
             src = (node.get("attrs") or {}).get("src")
-            if isinstance(src, str) and src and src not in seen:
-                seen.add(src)
+            key = image_src_key(src)
+            if key is not None and key not in seen:
+                seen.add(key)
                 srcs.append(src)
         for child in node.get("content") or []:
             visit(child)
@@ -447,10 +467,11 @@ def _build_image(
     """
     attrs = node.get("attrs") or {}
     src = attrs.get("src")
-    if not image_url_map or src not in image_url_map:
+    key = image_src_key(src)
+    if not image_url_map or key is None or key not in image_url_map:
         _warn(warnings, f"image dropped (no habrastorage url): {src}")
         return None
-    new_src = image_url_map[src]
+    new_src = image_url_map[key]
 
     def _coerce_int(value: Any) -> int | None:
         try:

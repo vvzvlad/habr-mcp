@@ -61,8 +61,6 @@ Server-level (shared, non-secret) variables:
 | `REQUEST_TIMEOUT` | httpx request timeout, seconds | `20` |
 | `PER_PAGE` | Page size for feeds / search | `20` |
 | `HABR_MCP_ENABLE_SOCIAL_TOOLS` | Expose the social tools (search/feed/comment/vote); off by default | `false` |
-| `DOCMOST_BASE_URL` | Base URL to download Docmost images for reupload | empty |
-| `DOCMOST_API_TOKEN` | Bearer token to download Docmost attachments | empty |
 
 Per-user Habr credentials are **not** environment variables — they arrive via
 `habr_login` and live encrypted under `data/`.
@@ -105,8 +103,8 @@ Author layer — drafts (requires an author session):
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `create_draft_from_docmost` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`) |
-| `create_draft_from_gdoc` | `title: str`, `doc: str`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Google Docs document (`doc` = JSON from `readDocument(format='json')`) |
+| `create_draft_from_docmost` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`, inline **or** an MCP `resource_link` to it) |
+| `create_draft_from_gdoc` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Google Docs document (`doc` = JSON from `readDocument(format='json')`, inline **or** an MCP `resource_link` to it) |
 | `get_draft` | `post_id: int` | Read a draft (summary + raw ProseMirror sources) |
 | `list_drafts` | `page: int = 1` | List the logged-in author's drafts (id, title, flow, hubs, tags) |
 | `update_draft_from_docmost` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields (read-modify-write autosave) |
@@ -121,6 +119,19 @@ intermediate Docmost-shaped (TipTap) tree (`src/gdoc_converter.py`), then reuse
 the same Docmost → Habr pipeline (images, marks, tables, lists, previews).
 Promoting a draft to public status ("Publish") is **not implemented** — protocol
 gap (`docs/habr-publication-protocol.md` §8).
+
+### Content intake: inline or `resource_link`
+
+The `doc` body and the document's images can each be passed **inline** (as before)
+or as an MCP **`resource_link`** (`{"type":"resource_link","uri":...}`). For a link,
+habr fetches the `uri` itself — a plain anonymous HTTP GET (no credentials), or a
+local decode for a `data:` URI. Inline lets a client `curl` a large body straight
+into the request without routing it through the model. Images (only `image` nodes)
+are resolved the same way and re-hosted on habrastorage; when the source returns a
+sha256-shaped `ETag`, the fetched bytes are integrity-checked. There is **no
+Docmost coupling** anymore — the old `DOCMOST_BASE_URL` / `DOCMOST_API_TOKEN`
+image-download path is gone; habr fetches whatever URL/link it is given, with no
+token. See `docs/resource-link-contract.md` for the full producer/consumer contract.
 
 ## About the write endpoints (reverse-engineering)
 
