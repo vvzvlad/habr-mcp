@@ -33,7 +33,18 @@ is never mistaken for a link.
 | `https://`/`http://` | plain GET, **NO Authorization header**, habr's proxy/timeout/UA. The `uri` must be reachable without habr-specific creds (public, or token embedded in the URL itself). |
 | `data:<mime>[;base64],<payload>` | decoded locally, **no network**. The "raw bytes inline" path — use when there is no fetchable URL. |
 
-Nothing else is supported (no `file://`, no auth negotiation).
+Nothing else is supported (no `file://`, no auth negotiation). HTTP redirects ARE
+followed (no credentials are sent, so nothing leaks).
+
+### 2.1 Integrity (`ETag`)
+
+When an `http(s)` response carries an `ETag` whose value is a bare sha256 hex
+digest (`ETag: "<64-hex>"`; a weak `W/"…"` prefix is tolerated), habr verifies
+`sha256(body)` against it and rejects a mismatch as a corrupted/truncated blob.
+Any other or absent `ETag` is left unverified (opaque CDN validators keep
+working). A producer serving blobs from its own store SHOULD send
+`ETag: "<sha256hex>"` so habr can detect truncation — this is the integrity
+channel (it supersedes the earlier `X-Blob-Sha256` idea).
 
 ## 3. Where the contract applies
 
@@ -102,8 +113,11 @@ rewrites the node `src` to the habrastorage URL.
 
 ## 5. Error behavior
 
-- **Body** link fetch fails (network / non-2xx / bad data URI) → the tool returns
-  a Russian error string; no draft is created or updated.
+A *fetch failure* is any of: a network error, a non-2xx status, a malformed
+`data:` URI, **or a sha256 mismatch** against a sha256-shaped `ETag` (§2.1).
+
+- **Body** link fetch fails → the tool returns a Russian error string; no draft is
+  created or updated.
 - **Image** link fetch fails → that image is skipped with a warning; publishing
   continues (the body still goes through).
 
@@ -114,4 +128,7 @@ rewrites the node `src` to the habrastorage URL.
    body (both stay valid).
 2. Per-image: replace token-protected Docmost `src` URLs with a fetchable URL, a
    pre-signed URL, a `data:` URI, or a `resource_link`.
-3. Nothing else. habr just expands whatever link it is handed.
+3. Send each blob with `ETag: "<sha256hex>"` (a strong sha256 validator) so habr
+   integrity-checks the bytes and detects a truncated/corrupted transfer (§2.1).
+   Optional but recommended, especially for an ephemeral store.
+4. Nothing else. habr just expands whatever link it is handed.

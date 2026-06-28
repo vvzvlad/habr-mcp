@@ -732,6 +732,30 @@ async def test_create_draft_from_docmost_resource_link_fetch_error(seeded_server
     assert not save_route.called
 
 
+@respx.mock
+async def test_create_draft_from_docmost_resource_link_malformed_uri(seeded_server):
+    # A malformed body-link uri (httpx.InvalidURL, NOT an HTTPError) must surface
+    # as a clean Russian error string, not an unhandled exception.
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "x", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": {"type": "resource_link", "uri": "http://[::1/page.json"},
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "Не удалось загрузить ресурс" in out
+    assert not save_route.called
+
+
 def test_draft_id_reads_post_key():
     from src.server import _draft_id
 
