@@ -332,8 +332,7 @@ underline, abbr, persona
 
 Анонс (`postLead`) — урезанный набор (без блочных: только inline-форматирование, `inline_image`,
 `inline_formula`, `code`, `mention`). Есть и другие зоны (`postComment`, `thread`, `docs`, …) —
-например **комментарии** (`postComment`) тоже принимают `editorVersion 2`, но наш `post_comment`
-сейчас шлёт простой HTML, и это работает.
+например **комментарии** (`postComment`) тоже принимают `editorVersion 2`.
 
 ---
 

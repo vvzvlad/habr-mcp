@@ -17,7 +17,6 @@ _ALIAS_VARS = (
     "HABR_MCP_HOST",
     "HABR_MCP_PORT",
     "HABR_MCP_STATE_DIR",
-    "HABR_MCP_ENABLE_SOCIAL_TOOLS",
 )
 
 
@@ -32,7 +31,6 @@ def test_aliases_populate_fields_with_correct_types(monkeypatch):
     monkeypatch.setenv("HABR_MCP_HOST", "0.0.0.0")
     monkeypatch.setenv("HABR_MCP_PORT", "9999")
     monkeypatch.setenv("HABR_MCP_STATE_DIR", "/tmp/somewhere")
-    monkeypatch.setenv("HABR_MCP_ENABLE_SOCIAL_TOOLS", "true")
 
     s = Settings(_env_file=None)
 
@@ -41,8 +39,6 @@ def test_aliases_populate_fields_with_correct_types(monkeypatch):
     assert s.port == 9999
     assert isinstance(s.port, int)
     assert s.state_dir == "/tmp/somewhere"
-    # enable_social_tools must be coerced to a real bool, not a truthy string.
-    assert s.enable_social_tools is True
 
 
 def test_alias_takes_priority_over_bare_name(monkeypatch):
@@ -63,11 +59,3 @@ def test_alias_takes_priority_over_bare_name(monkeypatch):
 
     assert s.host == "10.0.0.1"
     assert s.port == 5555
-
-
-def test_enable_social_tools_defaults_to_false(monkeypatch):
-    _clear_aliases(monkeypatch)
-
-    s = Settings(_env_file=None)
-
-    assert s.enable_social_tools is False

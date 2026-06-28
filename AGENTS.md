@@ -16,13 +16,13 @@ tools). It talks to Habr's internal (undocumented) JSON API
   state dir; credentials are encrypted at rest.
 - `src/registry.py` — builds one `HabrClient` per bearer token from the store.
 - `src/formatting.py` — pure formatting helpers (HTML → Markdown/text, rendering
-  of feeds/articles/comments/drafts).
+  of articles/drafts).
 - `src/converter.py` — pure Docmost (TipTap) ProseMirror → Habr editorVersion-2
   converter (for the author/draft tools).
 - `src/gdoc_converter.py` — pure Google Docs API "Document" JSON → intermediate
   Docmost-shaped (TipTap) doc; its output then feeds `src/converter.py`.
-- `src/server.py` — `build_server()`: registers MCP tools (read, write
-  comments/votes, the author/draft layer).
+- `src/server.py` — `build_server()`: registers MCP tools (read, the
+  author/draft layer).
 - `tests/` — pytest (httpx is mocked via respx).
 - `data/` — runtime state (the encrypted credential store); gitignored, mounted
   as a docker volume.
@@ -78,10 +78,6 @@ make run               # runs .venv/bin/python main.py
   `habr_login` and are stored encrypted under `data/`.
 - Code comments are in English; MCP tool descriptions (`description=`) are in
   Russian (text for the LLM).
-- The six "social" tools (`search_articles`, `list_articles`, `get_comments`,
-  `post_comment`, `vote_article`, `vote_comment`) are hidden behind the
-  `HABR_MCP_ENABLE_SOCIAL_TOOLS` feature toggle (default **off**); `get_article`
-  and the author/draft tools are always exposed.
 - All repeated actions (env setup, tests, run) go through `make` targets.
 - Python always runs inside a local `.venv`, created automatically by `make` on
   first use — never the system Python.

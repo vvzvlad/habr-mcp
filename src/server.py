@@ -34,8 +34,6 @@ from src.client import (
 )
 from src.formatting import (
     format_article,
-    format_article_list,
-    format_comments,
     format_draft,
     format_drafts_list,
     html_to_text,
@@ -44,11 +42,6 @@ from src.registry import ClientRegistry
 from src.settings import Settings
 from src.settings import settings as _default_settings
 from src.store import CredStore, derive_uuid_from_cookie, generate_key
-
-# Allowed enum values, reused for validation and error messages.
-FEEDS = ("top", "new", "news")
-PERIODS = ("daily", "weekly", "monthly", "yearly", "alltime")
-DIRECTIONS = ("up", "down")
 
 # Auth states returned by ``resolve``.
 ANON = "ANON"
@@ -292,22 +285,6 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         lifespan=_lifespan,
     )
 
-    def social_tool(**kwargs):
-        """Register a "social" tool only when the feature toggle is on.
-
-        Returns FastMCP's real ``mcp.tool`` decorator when
-        ``enable_social_tools`` is enabled; otherwise an identity decorator that
-        defines the function but never registers it with MCP, so the tool is
-        absent from the advertised tool list. Gates feed/search/comment/vote.
-        """
-        if base_settings.enable_social_tools:
-            return mcp.tool(**kwargs)
-
-        def _identity(func):
-            return func
-
-        return _identity
-
     async def _ready_client(ctx: Context) -> tuple[HabrClient | None, str | None]:
         """Resolve the caller; return (client, None) when READY else (None, guard).
 
@@ -322,57 +299,6 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         return None, anon_message()
 
     # -- read tools ---------------------------------------------------------
-
-    @social_tool(
-        name="search_articles",
-        description=(
-            "Поиск статей на Habr по тексту запроса (сортировка по релевантности). "
-            "Аргумент query — поисковая строка. Аргумент page — номер страницы "
-            "(по умолчанию 1). Возвращает нумерованный список статей с id, автором, "
-            "датой, рейтингом и хабами."
-        ),
-    )
-    async def search_articles(query: str, ctx: Context, page: int = 1) -> str:
-        client, msg = await _ready_client(ctx)
-        if msg:
-            return msg
-        try:
-            payload = await client.search_articles(query, page)
-        except HabrApiError as exc:
-            return str(exc)
-        return format_article_list(payload, f'Результаты поиска: "{query}" (стр. {page})')
-
-    @social_tool(
-        name="list_articles",
-        description=(
-            "Лента статей Habr. Аргумент feed: 'top' (по рейтингу), 'new' "
-            "(новые статьи) или 'news' (новости). Аргумент period: daily, weekly, "
-            "monthly, yearly или alltime (по умолчанию daily). Аргумент hub — "
-            "необязательный алиас хаба для фильтрации. Аргумент page — номер "
-            "страницы. Возвращает нумерованный список статей."
-        ),
-    )
-    async def list_articles(
-        ctx: Context,
-        feed: str = "top",
-        period: str = "daily",
-        hub: str | None = None,
-        page: int = 1,
-    ) -> str:
-        client, msg = await _ready_client(ctx)
-        if msg:
-            return msg
-        if feed not in FEEDS:
-            return f"Недопустимый feed='{feed}'. Допустимо: {', '.join(FEEDS)}."
-        if period not in PERIODS:
-            return f"Недопустимый period='{period}'. Допустимо: {', '.join(PERIODS)}."
-        try:
-            payload = await client.list_articles(feed, period, hub, page)
-        except HabrApiError as exc:
-            return str(exc)
-        hub_suffix = f", хаб {hub}" if hub else ""
-        header = f"Лента '{feed}' (период {period}{hub_suffix}, стр. {page})"
-        return format_article_list(payload, header)
 
     @mcp.tool(
         name="get_article",
@@ -391,92 +317,6 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         except HabrApiError as exc:
             return str(exc)
         return format_article(data)
-
-    @social_tool(
-        name="get_comments",
-        description=(
-            "Комментарии к статье Habr в виде дерева с отступами по уровню "
-            "вложенности. Аргумент article_id — id статьи. Аргумент limit — "
-            "максимум комментариев в выводе (по умолчанию 100). Показывает "
-            "автора, дату, рейтинг и текст каждого комментария."
-        ),
-    )
-    async def get_comments(article_id: int, ctx: Context, limit: int = 100) -> str:
-        client, msg = await _ready_client(ctx)
-        if msg:
-            return msg
-        try:
-            payload = await client.get_comments(article_id)
-        except HabrApiError as exc:
-            return str(exc)
-        return format_comments(payload, limit)
-
-    # -- write tools (require login) ---------------------------------------
-
-    @social_tool(
-        name="post_comment",
-        description=(
-            "Опубликовать комментарий к статье Habr (требует сохранённого логина — "
-            "вызови habr_login). Аргумент article_id — id статьи. Аргумент text — "
-            "текст комментария (обычный текст обернётся в HTML автоматически). "
-            "Аргумент parent_id — id комментария для ответа, либо пусто/0 для "
-            "комментария верхнего уровня."
-        ),
-    )
-    async def post_comment(
-        article_id: int, text: str, ctx: Context, parent_id: int | None = None
-    ) -> str:
-        client, msg = await _ready_client(ctx)
-        if msg:
-            return msg
-        try:
-            result = await client.post_comment(article_id, text, parent_id or 0)
-        except HabrApiError as exc:
-            return str(exc)
-        return f"Комментарий отправлен. Ответ Habr: {result}"
-
-    @social_tool(
-        name="vote_article",
-        description=(
-            "Проголосовать за статью Habr (требует сохранённого логина — вызови "
-            "habr_login). Аргумент article_id — id статьи. Аргумент direction — "
-            "'up' (плюс) или 'down' (минус)."
-        ),
-    )
-    async def vote_article(article_id: int, direction: str, ctx: Context) -> str:
-        client, msg = await _ready_client(ctx)
-        if msg:
-            return msg
-        if direction not in DIRECTIONS:
-            return f"Недопустимый direction='{direction}'. Допустимо: up, down."
-        try:
-            result = await client.vote_article(article_id, direction)
-        except HabrApiError as exc:
-            return str(exc)
-        return f"Голос за статью учтён. Ответ Habr: {result}"
-
-    @social_tool(
-        name="vote_comment",
-        description=(
-            "Проголосовать за комментарий Habr (требует сохранённого логина — "
-            "вызови habr_login). Нужны оба id: article_id — id статьи, "
-            "comment_id — id комментария. Аргумент direction — 'up' (плюс) или "
-            "'down' (минус)."
-        ),
-    )
-    async def vote_comment(
-        article_id: int, comment_id: int, direction: str, ctx: Context
-    ) -> str:
-        client, msg = await _ready_client(ctx)
-        if msg:
-            return msg
-        if direction not in DIRECTIONS:
-            return f"Недопустимый direction='{direction}'. Допустимо: up, down."
-        try:
-            result = await client.vote_comment(article_id, comment_id, direction)
-        except HabrApiError as exc:
-            return str(exc)
-        return f"Голос за комментарий учтён. Ответ Habr: {result}"
 
     # -- author tools: drafts (require a logged-in author session) ----------
 

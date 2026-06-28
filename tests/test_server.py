@@ -78,14 +78,6 @@ def seeded_server(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def seeded_social_server(tmp_path, monkeypatch):
-    """Seeded READY server with the social-tools feature toggle enabled."""
-    CredStore(str(tmp_path)).set(SEED_TOKEN, SEED_COOKIE, "CSRF456", "uuid-1")
-    monkeypatch.setattr(server_mod, "token_from_ctx", lambda ctx: SEED_TOKEN)
-    return build_server(Settings(state_dir=str(tmp_path), enable_social_tools=True))
-
-
-@pytest.fixture
 def anon_server(tmp_path):
     """A built server with an empty store and no token (every call is ANON)."""
     return build_server(Settings(state_dir=str(tmp_path)))
@@ -288,21 +280,6 @@ async def test_auth_status_ready_hides_token(seeded_server):
 
 
 @respx.mock
-async def test_list_articles_tool_returns_formatted(seeded_social_server, feed_payload):
-    respx.get(f"{BASE_URL}articles/").mock(
-        return_value=httpx.Response(200, json=feed_payload)
-    )
-    out = _text(
-        await seeded_social_server.call_tool(
-            "list_articles", {"feed": "top", "period": "daily"}
-        )
-    )
-    assert "Вторая статья" in out
-    assert "Первая" in out
-    assert "id=200" in out
-
-
-@respx.mock
 async def test_get_article_tool(seeded_server, article_payload):
     respx.get(f"{BASE_URL}articles/100/").mock(
         return_value=httpx.Response(200, json=article_payload)
@@ -310,59 +287,6 @@ async def test_get_article_tool(seeded_server, article_payload):
     out = _text(await seeded_server.call_tool("get_article", {"article_id": 100}))
     assert "# Заголовок статьи" in out
     assert "## Раздел" in out
-
-
-async def test_list_articles_tool_rejects_bad_feed(seeded_social_server):
-    out = _text(await seeded_social_server.call_tool("list_articles", {"feed": "bogus"}))
-    assert "Недопустимый feed" in out
-    assert "top" in out
-
-
-async def test_vote_article_tool_rejects_bad_direction(seeded_social_server):
-    out = _text(
-        await seeded_social_server.call_tool(
-            "vote_article", {"article_id": 100, "direction": "sideways"}
-        )
-    )
-    assert "Недопустимый direction" in out
-
-
-@respx.mock
-async def test_vote_article_tool_with_creds(seeded_social_server):
-    respx.post(f"{BASE_URL}articles/100/votes/up/").mock(
-        return_value=httpx.Response(200, json={"ok": True})
-    )
-    out = _text(
-        await seeded_social_server.call_tool(
-            "vote_article", {"article_id": 100, "direction": "up"}
-        )
-    )
-    assert "Голос за статью учтён" in out
-
-
-async def test_vote_comment_tool_rejects_bad_direction(seeded_social_server):
-    out = _text(
-        await seeded_social_server.call_tool(
-            "vote_comment",
-            {"article_id": 100, "comment_id": 5, "direction": "sideways"},
-        )
-    )
-    assert "Недопустимый direction" in out
-
-
-@respx.mock
-async def test_vote_comment_tool_with_creds(seeded_social_server):
-    route = respx.post(f"{BASE_URL}articles/100/comments/5/votes").mock(
-        return_value=httpx.Response(200, json={"vote": {"value": 1}, "score": 0})
-    )
-    out = _text(
-        await seeded_social_server.call_tool(
-            "vote_comment",
-            {"article_id": 100, "comment_id": 5, "direction": "up"},
-        )
-    )
-    assert "Голос за комментарий учтён" in out
-    assert route.calls.last.request.url.path == "/kek/v2/articles/100/comments/5/votes"
 
 
 @respx.mock
@@ -844,15 +768,7 @@ async def test_lifespan_closes_clients(seeded_server, monkeypatch):
     assert closed["count"] >= 1  # the per-user client was closed on teardown
 
 
-# -- social-tools feature toggle / list_drafts -------------------------------
-
-
-async def test_social_tools_enabled_when_toggle_on(seeded_social_server):
-    names = {t.name for t in await seeded_social_server.list_tools()}
-    assert {
-        "search_articles", "list_articles", "get_comments",
-        "post_comment", "vote_article", "vote_comment",
-    } <= names
+# -- list_drafts -------------------------------------------------------------
 
 
 @respx.mock
@@ -1085,112 +1001,6 @@ def test_draft_id_non_dict_input():
 
 
 # -- Phase 1: additional READY end-to-end tool calls -------------------------
-
-
-@respx.mock
-async def test_search_articles_tool_happy(seeded_social_server, feed_payload):
-    # search_articles hits articles/ and renders the formatted list under a header
-    # carrying the query.
-    respx.get(f"{BASE_URL}articles/").mock(
-        return_value=httpx.Response(200, json=feed_payload)
-    )
-    out = _text(
-        await seeded_social_server.call_tool("search_articles", {"query": "rust"})
-    )
-    assert "rust" in out
-    assert "Вторая статья" in out
-    assert "id=200" in out
-
-
-@respx.mock
-async def test_search_articles_tool_error(seeded_social_server):
-    # A Habr error dict (httpCode>=400) surfaces as the error message string.
-    respx.get(f"{BASE_URL}articles/").mock(
-        return_value=httpx.Response(200, json={"httpCode": 500, "message": "Boom"})
-    )
-    out = _text(
-        await seeded_social_server.call_tool("search_articles", {"query": "rust"})
-    )
-    assert out == "Boom"
-
-
-@respx.mock
-async def test_post_comment_tool_top_level_sends_parent_zero(seeded_social_server):
-    # Omitting parent_id must send parent id 0 (top-level comment).
-    route = respx.post(f"{BASE_URL}articles/100/comments/add/").mock(
-        return_value=httpx.Response(200, json={"ok": True})
-    )
-    out = _text(
-        await seeded_social_server.call_tool(
-            "post_comment", {"article_id": 100, "text": "hi"}
-        )
-    )
-    assert "Комментарий отправлен" in out
-    import json as json_module
-
-    body = json_module.loads(route.calls.last.request.content)
-    assert body["parent_id"] == 0
-
-
-@respx.mock
-async def test_post_comment_tool_reply_sends_parent_id(seeded_social_server):
-    # A provided parent_id is forwarded as the reply target.
-    route = respx.post(f"{BASE_URL}articles/100/comments/add/").mock(
-        return_value=httpx.Response(200, json={"ok": True})
-    )
-    out = _text(
-        await seeded_social_server.call_tool(
-            "post_comment", {"article_id": 100, "text": "re", "parent_id": 77}
-        )
-    )
-    assert "Комментарий отправлен" in out
-    import json as json_module
-
-    body = json_module.loads(route.calls.last.request.content)
-    assert body["parent_id"] == 77
-
-
-@respx.mock
-async def test_post_comment_tool_error(seeded_social_server):
-    # A Habr error dict surfaces as the error message string.
-    respx.post(f"{BASE_URL}articles/100/comments/add/").mock(
-        return_value=httpx.Response(200, json={"httpCode": 403, "message": "Nope"})
-    )
-    out = _text(
-        await seeded_social_server.call_tool(
-            "post_comment", {"article_id": 100, "text": "hi"}
-        )
-    )
-    assert out == "Nope"
-
-
-@respx.mock
-async def test_get_comments_tool_truncates(seeded_social_server, comments_payload):
-    # limit=1 renders only the root; the beyond-limit child author is absent and
-    # the truncation note appears.
-    respx.get(f"{BASE_URL}articles/100/comments/").mock(
-        return_value=httpx.Response(200, json=comments_payload)
-    )
-    out = _text(
-        await seeded_social_server.call_tool(
-            "get_comments", {"article_id": 100, "limit": 1}
-        )
-    )
-    assert "carol" in out
-    assert "dave" not in out
-    assert "показаны первые 1 из 2" in out
-
-
-@respx.mock
-async def test_get_comments_tool_error(seeded_social_server):
-    # A Habr error dict surfaces as the error message string.
-    respx.get(f"{BASE_URL}articles/100/comments/").mock(
-        return_value=httpx.Response(200, json={"httpCode": 404, "message": "Gone"})
-    )
-    out = _text(
-        await seeded_social_server.call_tool("get_comments", {"article_id": 100})
-    )
-    assert out == "Gone"
 
 
 @respx.mock

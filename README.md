@@ -6,9 +6,8 @@ HTTP-only, multi-tenant MCP server for habr.com. It lets an LLM read and write o
 Habr (and publish drafts) through Habr's internal, undocumented JSON API
 `https://habr.com/kek/v2/`.
 
-- **Read** works anonymously (search, feeds, article, comments).
-- **Write** (comment, vote) and the **author/draft** tools require a
-  logged-in session.
+- **Read** works anonymously (a single article).
+- The **author/draft** tools require a logged-in session.
 
 The server runs over `streamable-http` and serves many users at once. There are
 **no global credentials**: each user authenticates with their own bearer token
@@ -61,7 +60,6 @@ Server-level (shared, non-secret) variables:
 | `PROXY` | HTTP/SOCKS proxy URL for httpx | empty |
 | `REQUEST_TIMEOUT` | httpx request timeout, seconds | `20` |
 | `PER_PAGE` | Page size for feeds / search | `20` |
-| `HABR_MCP_ENABLE_SOCIAL_TOOLS` | Expose the social tools (search/feed/comment/vote); off by default | `false` |
 
 Per-user Habr credentials are **not** environment variables — they arrive via
 `habr_login` and live encrypted under `data/`.
@@ -79,26 +77,7 @@ Read (anonymous):
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `search_articles` | `query: str`, `page: int = 1` | Full-text article search |
-| `list_articles` | `feed: str = "top"` (`top`/`new`/`news`), `period: str = "daily"` (`daily`/`weekly`/`monthly`/`yearly`/`alltime`), `hub: str \| None`, `page: int = 1` | Article feed |
 | `get_article` | `article_id: int` | Full article text (Markdown) |
-| `get_comments` | `article_id: int`, `limit: int = 100` | Comment tree |
-
-> The `search_articles`, `list_articles` and `get_comments` tools are **social
-> tools** and are **disabled by default**. Enable them (together with the write
-> tools below) with `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`. `get_article` is always
-> available.
-
-Write (requires a session):
-
-| Tool | Parameters | What it does |
-| --- | --- | --- |
-| `post_comment` | `article_id: int`, `text: str`, `parent_id: int \| None` | Comment (0/None = top level) |
-| `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Vote on an article |
-| `vote_comment` | `article_id: int`, `comment_id: int`, `direction: str` (`up`/`down`) | Vote on a comment |
-
-> `post_comment`, `vote_article` and `vote_comment` are **social tools**,
-> **disabled by default** — enable them with `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`.
 
 Author layer — drafts (requires an author session):
 
@@ -134,17 +113,3 @@ sha256-shaped `ETag`, the fetched bytes are integrity-checked. There is **no
 Docmost coupling** anymore — the old `DOCMOST_BASE_URL` / `DOCMOST_API_TOKEN`
 image-download path is gone; habr fetches whatever URL/link it is given, with no
 token. See `docs/resource-link-contract.md` for the full producer/consumer contract.
-
-## About the write endpoints (reverse-engineering)
-
-> Write endpoints are reverse-engineered from habr.com's internal API.
-
-Routes are confirmed at the route level (without auth they return
-`HTTP 401 Unauthenticated`):
-
-- `post_comment` → `POST articles/<id>/comments/add/` — confirmed.
-- `vote_article` → `POST articles/<id>/votes/up|down/` — confirmed.
-- `vote_comment` → `POST articles/<article_id>/comments/<comment_id>/votes` with body `{"value": 1|-1}` — verified live (HTTP 200).
-
-If Habr changes routes, all URL/body/header logic is centralised in
-`src/client.py` — fix it there.

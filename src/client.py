@@ -13,7 +13,6 @@ import asyncio
 import base64
 import binascii
 import hashlib
-import html as html_module
 import ipaddress
 import re
 import secrets
@@ -36,12 +35,6 @@ from src.settings import Settings
 
 # Base for every endpoint; trailing slash matters for httpx relative URL joins.
 BASE_URL = "https://habr.com/kek/v2/"
-
-# Message shown when a write tool is called without stored credentials.
-MISSING_CREDS_MESSAGE = (
-    "Нет сохранённой сессии Habr. Вызовите habr_login и передайте полный "
-    "Cookie-заголовок залогиненного браузера."
-)
 
 # Message shown when an author tool (drafts) is called without author credentials.
 AUTHOR_MISSING_CREDS_MESSAGE = (
@@ -282,17 +275,6 @@ def _validate_announce_length(text: str) -> None:
         )
 
 
-def _wrap_html(text: str) -> str:
-    """Habr expects HTML in comment bodies.
-
-    If the caller's text already contains a tag, send it as-is; otherwise escape
-    ``& < >`` and wrap it in a single paragraph.
-    """
-    if "<" in text:
-        return text
-    return "<p>" + html_module.escape(text, quote=False) + "</p>"
-
-
 def _cookie_interface_lang(cookie: str) -> str:
     """Return the interface language (`hl` cookie) so the csrf probe hits the
     matching feed URL and avoids a language redirect. `hl` may be like 'en' or
@@ -440,25 +422,6 @@ class HabrClient:
                 raise HabrApiError(str(message))
         return data
 
-    def _auth_headers(self) -> dict[str, str]:
-        """Build Cookie + csrf-token headers for comment/vote writes.
-
-        In the multi-tenant model the user supplies the FULL Cookie header
-        (``habr_cookie``), so that is preferred. The legacy single-``connect.sid``
-        construction is kept as a fallback for callers that only set
-        ``habr_connect_sid``. Raises if neither cookie source is available.
-        """
-        token = self._settings.habr_csrf_token
-        cookie = self._settings.habr_cookie
-        if cookie and token:
-            return {"Cookie": cookie, "csrf-token": token}
-        sid = self._settings.habr_connect_sid
-        if not sid or not token:
-            raise HabrApiError(MISSING_CREDS_MESSAGE)
-        cookie_name = self._settings.habr_csrf_cookie_name
-        cookie = f"connect.sid={sid}; {cookie_name}={token}"
-        return {"Cookie": cookie, "csrf-token": token}
-
     async def _author_headers(self, referer: str | None = None) -> dict[str, str]:
         """Build the header bundle for ``publication/…`` author endpoints.
 
@@ -519,17 +482,13 @@ class HabrClient:
         json: dict[str, Any] | None = None,
         *,
         method: str = "POST",
-        auth: bool = False,
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
-        """Send a POST/DELETE to ``path``; optionally with auth headers.
+        """Send a POST/DELETE to ``path``; optionally with extra headers.
 
-        ``auth=True`` adds the comment/vote headers; ``extra_headers`` carries the
-        author-endpoint headers and is merged last.
+        ``extra_headers`` carries the author-endpoint headers and is merged last.
         """
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if auth:
-            headers.update(self._auth_headers())
         if extra_headers:
             headers.update(extra_headers)
         # Send default lang params here too (Habr expects them on writes).
@@ -563,94 +522,9 @@ class HabrClient:
 
     # -- read methods -------------------------------------------------------
 
-    async def list_articles(
-        self,
-        feed: str = "top",
-        period: str = "daily",
-        hub: str | None = None,
-        page: int = 1,
-    ) -> dict[str, Any]:
-        """Fetch an article feed: ``top``, ``new`` or ``news``.
-
-        ``sort=date`` (new/news) requires a ``period`` or Habr returns HTTP 422,
-        so we always send it.
-        """
-        params: dict[str, Any] = {
-            "page": page,
-            "perPage": self._settings.per_page,
-            "period": period,
-        }
-        if feed == "top":
-            params["sort"] = "rating"
-        elif feed == "new":
-            params["sort"] = "date"
-        elif feed == "news":
-            params["news"] = "true"
-            params["sort"] = "date"
-        else:
-            raise HabrApiError(f"Неизвестная лента: {feed}")
-        if hub:
-            params["hub"] = hub
-        return await self._get("articles/", params)
-
-    async def search_articles(self, query: str, page: int = 1) -> dict[str, Any]:
-        """Full-text search over articles, sorted by relevance."""
-        params: dict[str, Any] = {
-            "query": query,
-            "sort": "relevance",
-            "page": page,
-            "perPage": self._settings.per_page,
-        }
-        return await self._get("articles/", params)
-
     async def get_article(self, article_id: int) -> dict[str, Any]:
         """Fetch a single full article object (includes ``textHtml`` body)."""
         return await self._get(f"articles/{article_id}/")
-
-    async def get_comments(self, article_id: int) -> dict[str, Any]:
-        """Fetch the comment tree payload for an article."""
-        return await self._get(f"articles/{article_id}/comments/")
-
-    # -- write methods (require auth) --------------------------------------
-
-    async def post_comment(
-        self, article_id: int, text: str, parent_id: int = 0
-    ) -> dict[str, Any]:
-        """Post a comment; ``parent_id`` 0 = top-level, else a reply target."""
-        body = {"text": _wrap_html(text), "parent_id": parent_id}
-        return await self._post(
-            f"articles/{article_id}/comments/add/", json=body, auth=True
-        )
-
-    @staticmethod
-    def _check_direction(direction: str) -> None:
-        """Reject anything but ``up``/``down`` before it reaches the URL path."""
-        if direction not in ("up", "down"):
-            raise HabrApiError("Направление должно быть 'up' или 'down'.")
-
-    async def vote_article(self, article_id: int, direction: str) -> dict[str, Any]:
-        """Vote on an article; direction (``up``/``down``) is in the URL path."""
-        self._check_direction(direction)
-        return await self._post(
-            f"articles/{article_id}/votes/{direction}/", json={}, auth=True
-        )
-
-    async def vote_comment(
-        self, article_id: int, comment_id: int, direction: str
-    ) -> dict[str, Any]:
-        """Vote on a comment; direction (``up``/``down``) goes in the JSON body.
-
-        Posts ``{"value": 1}`` (up) or ``{"value": -1}`` (down) to
-        ``articles/<article_id>/comments/<comment_id>/votes`` — the route Habr's
-        own UI hits (verified live, HTTP 200).
-        """
-        self._check_direction(direction)
-        value = 1 if direction == "up" else -1
-        return await self._post(
-            f"articles/{article_id}/comments/{comment_id}/votes",
-            json={"value": value},
-            auth=True,
-        )
 
     # -- author layer: drafts (publication/…) ------------------------------
 

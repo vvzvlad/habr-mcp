@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-from hypothesis import given
-from hypothesis import strategies as st
-
 from src.formatting import (
     _author_alias,
-    _truncate,
     format_article,
-    format_article_list,
-    format_comments,
     format_draft,
     format_drafts_list,
     html_to_markdown,
@@ -36,24 +30,6 @@ def test_html_to_text_flattens_whitespace():
     assert "\n" not in text
 
 
-def test_format_article_list_follows_publication_ids_order(feed_payload):
-    out = format_article_list(feed_payload, "Лента")
-    # publicationIds is ["200", "100"]; item 200 ("Вторая") must come first.
-    pos_second = out.index("Вторая статья")
-    pos_first = out.index("Первая")
-    assert pos_second < pos_first
-    # Metadata pieces present.
-    assert "Всего страниц: 5" in out
-    assert "id=200" in out
-    assert "@bob" in out
-    assert "рейтинг 20" in out
-
-
-def test_format_article_list_empty():
-    out = format_article_list({"publicationIds": [], "publicationRefs": {}}, "H")
-    assert "Ничего не найдено" in out
-
-
 def test_format_article_renders_meta_and_body(article_payload):
     out = format_article(article_payload)
     assert "# Заголовок статьи" in out
@@ -66,121 +42,6 @@ def test_format_article_renders_meta_and_body(article_payload):
     # Body converted from HTML to Markdown.
     assert "## Раздел" in out
     assert "жирным" in out
-
-
-def test_format_comments_builds_indented_tree(comments_payload):
-    out = format_comments(comments_payload, limit=100)
-    assert "@carol" in out
-    assert "@dave" in out
-    assert "Корневой комментарий" in out
-    assert "Ответ на корневой" in out
-    # Child (level 1) is indented by two spaces relative to root marker.
-    assert "  — @dave" in out
-    # Root marker has no leading indent.
-    assert "— @carol" in out
-
-
-def test_format_comments_respects_limit(comments_payload):
-    out = format_comments(comments_payload, limit=1)
-    assert "@carol" in out
-    # Child should be cut off by the limit.
-    assert "@dave" not in out
-    assert "показаны первые 1 из 2" in out
-
-
-def test_format_comments_empty():
-    assert format_comments({"comments": {}, "threads": []}, 10) == "Комментариев нет."
-
-
-def test_format_comments_string_level_does_not_crash():
-    # Habr can return numeric fields as strings; level="1" must indent, not crash.
-    payload = {
-        "comments": {
-            "1": {
-                "id": "1",
-                "level": "1",
-                "timePublished": "2026-01-01T11:00:00+00:00",
-                "score": 5,
-                "message": "<p>Строковый уровень</p>",
-                "author": {"alias": "carol"},
-                "children": [],
-            }
-        },
-        "threads": ["1"],
-    }
-    out = format_comments(payload, limit=100)
-    assert "Строковый уровень" in out
-    # level "1" -> two-space indent before the marker.
-    assert "  — @carol" in out
-
-
-def test_format_comments_garbage_level_falls_back_to_zero():
-    # A non-numeric level must fall back to 0 (no indent), not raise.
-    payload = {
-        "comments": {
-            "1": {
-                "id": "1",
-                "level": "deep",
-                "message": "<p>Мусорный уровень</p>",
-                "author": {"alias": "carol"},
-                "children": [],
-            }
-        },
-        "threads": ["1"],
-    }
-    out = format_comments(payload, limit=100)
-    assert "— @carol" in out
-    assert "  — @carol" not in out
-
-
-def test_format_comments_cyclic_graph_terminates_and_dedups():
-    # Cyclic children 1->2->1: must terminate, render each once, sane counts.
-    payload = {
-        "comments": {
-            "1": {
-                "id": "1",
-                "level": 0,
-                "message": "<p>Первый</p>",
-                "author": {"alias": "carol"},
-                "children": ["2"],
-            },
-            "2": {
-                "id": "2",
-                "level": 1,
-                "message": "<p>Второй</p>",
-                "author": {"alias": "dave"},
-                "children": ["1"],
-            },
-        },
-        "threads": ["1"],
-    }
-    out = format_comments(payload, limit=100)
-    # Each comment rendered exactly once.
-    assert out.count("@carol") == 1
-    assert out.count("@dave") == 1
-    # Header count must not exceed total, and no false "truncated" note.
-    assert "показано 2 из 2" in out
-    assert "показаны первые" not in out
-
-
-def test_format_comments_truncation_note_when_total_exceeds_limit():
-    # Three comments, limit 2: header shows 2 of 3 and a truncation note appears.
-    payload = {
-        "comments": {
-            "1": {"id": "1", "level": 0, "message": "<p>A</p>",
-                  "author": {"alias": "u1"}, "children": ["2"]},
-            "2": {"id": "2", "level": 1, "message": "<p>B</p>",
-                  "author": {"alias": "u2"}, "children": ["3"]},
-            "3": {"id": "3", "level": 2, "message": "<p>C</p>",
-                  "author": {"alias": "u3"}, "children": []},
-        },
-        "threads": ["1"],
-    }
-    out = format_comments(payload, limit=2)
-    assert "показано 2 из 3" in out
-    assert "показаны первые 2 из 3 комментариев" in out
-    # The third comment must be cut off by the limit.
-    assert "@u3" not in out
 
 
 # --- format_draft --------------------------------------------------------
@@ -316,91 +177,6 @@ def test_format_drafts_list_tags_string_and_dict_both_render():
     assert "теги: a, b" in out
 
 
-# --- _truncate / deleted comments via format_comments --------------------
-
-
-def test_truncate_via_format_comments_long_message_ends_with_ellipsis():
-    # A message longer than 280 chars must be truncated with a trailing "…".
-    payload = {
-        "comments": {
-            "1": {
-                "id": "1",
-                "level": 0,
-                "message": "x" * 500,
-                "author": {"alias": "carol"},
-                "children": [],
-            }
-        },
-        "threads": ["1"],
-    }
-    out = format_comments(payload, limit=100)
-    assert "…" in out
-    # The full 500-char body must not leak.
-    assert "x" * 500 not in out
-
-
-def test_deleted_comment_via_deleted_flag_hides_message():
-    # deleted: true -> body is "[удалён]" and the real text does not leak.
-    payload = {
-        "comments": {
-            "1": {
-                "id": "1",
-                "level": 0,
-                "deleted": True,
-                "message": "<p>СЕКРЕТ</p>",
-                "author": {"alias": "carol"},
-                "children": [],
-            }
-        },
-        "threads": ["1"],
-    }
-    out = format_comments(payload, limit=100)
-    assert "[удалён]" in out
-    assert "СЕКРЕТ" not in out
-
-
-def test_deleted_comment_via_status_hides_message():
-    # status: "deleted" -> body is "[удалён]" and the real text does not leak.
-    payload = {
-        "comments": {
-            "1": {
-                "id": "1",
-                "level": 0,
-                "status": "deleted",
-                "message": "<p>СЕКРЕТ</p>",
-                "author": {"alias": "carol"},
-                "children": [],
-            }
-        },
-        "threads": ["1"],
-    }
-    out = format_comments(payload, limit=100)
-    assert "[удалён]" in out
-    assert "СЕКРЕТ" not in out
-
-
-def test_format_comments_break_at_root_thread_level():
-    # Multiple root threads, limit < number of roots -> loop breaks at root level.
-    payload = {
-        "comments": {
-            "1": {"id": "1", "level": 0, "message": "<p>R1</p>",
-                  "author": {"alias": "u1"}, "children": []},
-            "2": {"id": "2", "level": 0, "message": "<p>R2</p>",
-                  "author": {"alias": "u2"}, "children": []},
-            "3": {"id": "3", "level": 0, "message": "<p>R3</p>",
-                  "author": {"alias": "u3"}, "children": []},
-        },
-        "threads": ["1", "2", "3"],
-    }
-    out = format_comments(payload, limit=2)
-    # Only the first two roots render; the third is cut at the root loop.
-    assert "@u1" in out
-    assert "@u2" in out
-    assert "@u3" not in out
-    # Header counts stay consistent.
-    assert "показано 2 из 3" in out
-
-
 # --- _author_alias -------------------------------------------------------
 
 
@@ -431,26 +207,3 @@ def test_format_article_empty_data_uses_placeholders_and_omits_hub_tag_lines():
 def test_html_to_text_empty_returns_empty():
     # Empty input -> empty string.
     assert html_to_text("") == ""
-
-
-# --- format_article_list edge cases --------------------------------------
-
-
-def test_format_article_list_missing_ref_uses_placeholders_and_omits_pages():
-    # An id with no ref -> placeholders; no pagesCount -> no "Всего страниц:" line.
-    payload = {"publicationIds": ["100"], "publicationRefs": {}}
-    out = format_article_list(payload, "Лента")
-    assert "(без заголовка)" in out
-    assert "@?" in out
-    assert "Всего страниц:" not in out
-
-
-# --- property: _truncate length invariant --------------------------------
-
-
-@given(text=st.text(), limit=st.integers(min_value=1, max_value=500))
-def test_truncate_length_never_exceeds_limit(text, limit):
-    # Truncated form is (limit-1) chars + the single "…" char, so length == limit;
-    # the non-truncated branch returns the stripped text whose length is already
-    # <= limit. Either way len(result) <= limit.
-    assert len(_truncate(text, limit)) <= limit

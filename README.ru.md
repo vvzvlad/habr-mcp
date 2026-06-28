@@ -6,9 +6,8 @@
 LLM читать и писать на Habr (и публиковать черновики) через внутренний
 недокументированный JSON-API Habr `https://habr.com/kek/v2/`.
 
-- **Чтение** работает анонимно (поиск, ленты, статья, комментарии).
-- **Запись** (комментарии, голоса) и инструменты **автора/черновиков**
-  требуют авторизованной сессии.
+- **Чтение** статьи работает анонимно.
+- Инструменты **автора/черновиков** требуют авторизованной сессии.
 
 Сервер работает по `streamable-http` и обслуживает много пользователей одновременно.
 **Глобальных учётных данных нет**: каждый пользователь аутентифицируется собственным
@@ -63,7 +62,6 @@ MCP-клиенты подключаются к `https://<host>/mcp`. watchtower 
 | `PROXY` | URL HTTP/SOCKS-прокси для httpx | пусто |
 | `REQUEST_TIMEOUT` | Тайм-аут запроса httpx, секунды | `20` |
 | `PER_PAGE` | Размер страницы для лент / поиска | `20` |
-| `HABR_MCP_ENABLE_SOCIAL_TOOLS` | Включить «социальные» инструменты (поиск/ленты/комментарии/голоса); по умолчанию выключено | `false` |
 
 Учётные данные Habr для каждого пользователя **не** являются переменными
 окружения — они поступают через `habr_login` и хранятся в зашифрованном виде в
@@ -82,25 +80,7 @@ MCP-клиенты подключаются к `https://<host>/mcp`. watchtower 
 
 | Инструмент | Параметры | Что делает |
 | --- | --- | --- |
-| `search_articles` | `query: str`, `page: int = 1` | Полнотекстовый поиск статей |
-| `list_articles` | `feed: str = "top"` (`top`/`new`/`news`), `period: str = "daily"` (`daily`/`weekly`/`monthly`/`yearly`/`alltime`), `hub: str \| None`, `page: int = 1` | Лента статей |
 | `get_article` | `article_id: int` | Полный текст статьи (Markdown) |
-| `get_comments` | `article_id: int`, `limit: int = 100` | Дерево комментариев |
-
-> Инструменты `search_articles`, `list_articles` и `get_comments` — **социальные**
-> и **по умолчанию выключены**. Включите их (вместе с инструментами записи ниже)
-> через `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`. `get_article` доступен всегда.
-
-Запись (требует сессии):
-
-| Инструмент | Параметры | Что делает |
-| --- | --- | --- |
-| `post_comment` | `article_id: int`, `text: str`, `parent_id: int \| None` | Комментарий (0/None — верхний уровень) |
-| `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Голос за статью |
-| `vote_comment` | `article_id: int`, `comment_id: int`, `direction: str` (`up`/`down`) | Голос за комментарий |
-
-> `post_comment`, `vote_article` и `vote_comment` — **социальные инструменты**,
-> **по умолчанию выключены**; включаются через `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`.
 
 Слой автора — черновики (требует сессии автора):
 
@@ -136,17 +116,3 @@ Docs API в промежуточное дерево в формате Docmost (T
 нет** — прежний путь скачивания картинок через `DOCMOST_BASE_URL` /
 `DOCMOST_API_TOKEN` убран; habr забирает любой переданный ему URL/ссылку без токена.
 Полный контракт продьюсера/консьюмера — в `docs/resource-link-contract.md`.
-
-## О write-эндпоинтах (реверс-инжиниринг)
-
-> Write-эндпоинты получены реверс-инжинирингом внутреннего API habr.com.
-
-Маршруты подтверждены на уровне роутов (без авторизации возвращают
-`HTTP 401 Unauthenticated`):
-
-- `post_comment` → `POST articles/<id>/comments/add/` — подтверждён.
-- `vote_article` → `POST articles/<id>/votes/up|down/` — подтверждён.
-- `vote_comment` → `POST articles/<article_id>/comments/<comment_id>/votes` с телом `{"value": 1|-1}` — проверено вживую (HTTP 200).
-
-Если Habr изменит маршруты — вся логика URL/тел/заголовков сосредоточена в
-`src/client.py`, правьте там.
