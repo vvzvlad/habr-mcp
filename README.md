@@ -1,5 +1,7 @@
 # Habr MCP server
 
+**English** | [Русский](README.ru.md)
+
 HTTP-only, multi-tenant MCP server for habr.com. It lets an LLM read and write on
 Habr (and publish drafts) through Habr's internal, undocumented JSON API
 `https://habr.com/kek/v2/`.
