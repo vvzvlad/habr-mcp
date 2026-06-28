@@ -434,6 +434,30 @@ async def test_create_draft_tool_reports_id(seeded_server, docmost_doc):
 
 
 @respx.mock
+async def test_create_draft_from_docmost_accepts_dict(seeded_server, docmost_doc):
+    # Regression: FastMCP pre-parses an object-shaped JSON string into a dict
+    # before validation, so ``doc`` arrives as a dict (not a string) — the tool
+    # must accept it instead of rejecting it at the schema layer.
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "999", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": docmost_doc,
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=999" in out
+
+
+@respx.mock
 async def test_create_draft_from_gdoc_tool_reports_id(seeded_server):
     import json as json_module
 
@@ -497,6 +521,30 @@ async def test_update_draft_from_gdoc_tool_saves(seeded_server, post_data_payloa
             {
                 "post_id": 42,
                 "doc": json_module.dumps(gdoc),
+                "announce": "Анонс статьи " * 10,
+            },
+        )
+    )
+    assert "Черновик 42 сохранён" in out
+
+
+@respx.mock
+async def test_update_draft_from_docmost_tool_saves(seeded_server, post_data_payload,
+                                                    docmost_doc):
+    # Regression: ``doc`` arrives as a dict (FastMCP pre-parses an object-shaped
+    # JSON string before validation), so the optional ``doc`` must accept it.
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "update_draft_from_docmost",
+            {
+                "post_id": 42,
+                "doc": docmost_doc,
                 "announce": "Анонс статьи " * 10,
             },
         )

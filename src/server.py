@@ -412,7 +412,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     )
     async def create_draft_from_docmost(
         title: str,
-        doc: str,
+        doc: str | dict,
         ctx: Context,
         hubs: list[str] | None = None,
         tags: list[str] | None = None,
@@ -423,10 +423,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         client, msg = await _ready_client(ctx)
         if msg:
             return msg
-        try:
-            parsed_doc = json.loads(doc)
-        except (ValueError, TypeError) as exc:
-            return f"Не удалось разобрать doc как JSON: {exc}"
+        parsed_doc, parse_error = _parse_doc_arg(doc)
+        if parse_error:
+            return parse_error
         try:
             result = await client.create_draft(
                 title,
@@ -551,7 +550,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         post_id: int,
         ctx: Context,
         title: str | None = None,
-        doc: str | None = None,
+        # ``str | dict | None`` (not just ``str``): FastMCP pre-parses an
+        # object-shaped JSON string for an OPTIONAL parameter into a dict before
+        # validation, so the annotation must accept that dict too — otherwise a
+        # valid client payload is rejected at the schema layer.
+        doc: str | dict | None = None,
         hubs: list[str] | None = None,
         tags: list[str] | None = None,
         flow: str | None = None,
@@ -563,10 +566,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return msg
         parsed_doc = None
         if doc is not None:
-            try:
-                parsed_doc = json.loads(doc)
-            except (ValueError, TypeError) as exc:
-                return f"Не удалось разобрать doc как JSON: {exc}"
+            parsed_doc, parse_error = _parse_doc_arg(doc)
+            if parse_error:
+                return parse_error
         try:
             result = await client.update_draft(
                 post_id,
