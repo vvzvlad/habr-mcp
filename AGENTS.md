@@ -38,7 +38,7 @@ clear guard message when the caller is not ready.
 ## Author layer (drafts)
 `create_draft_from_docmost` / `create_draft_from_gdoc` / `get_draft` /
 `list_drafts` / `update_draft_from_docmost` / `update_draft_from_gdoc` /
-`delete_draft` / `resolve_hubs` / `list_flows` publish
+`delete_draft` / `resolve_hubs` / `search_hubs` / `list_flows` publish
 Docmost pages **and Google Docs documents** into Habr **drafts** (`publication/…`,
 protocol in `docs/habr-publication-protocol.md`). Promoting a draft to public
 status ("Publish") is **NOT implemented** — protocol gap §8. Docmost article

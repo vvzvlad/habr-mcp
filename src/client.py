@@ -14,8 +14,10 @@ import base64
 import binascii
 import hashlib
 import html as html_module
+import ipaddress
 import re
 import secrets
+import socket
 from os.path import splitext
 from urllib.parse import unquote_to_bytes, urlsplit
 from typing import Any
@@ -176,6 +178,87 @@ def _upload_filename(uri: str, content_type: str | None) -> str:
             return name
     ext = _IMAGE_EXT_BY_CONTENT_TYPE.get((content_type or "").lower())
     return f"image{ext}" if ext else "image.png"
+
+
+def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for any non-public address we must never let the server reach.
+
+    Covers loopback, private (10/8, 172.16/12, 192.168/16), link-local
+    (169.254/16 incl. the 169.254.169.254 cloud-metadata endpoint, fe80::/10),
+    reserved, multicast and unspecified ranges, plus a catch-all for any address
+    that is not globally routable (e.g. CGNAT 100.64.0.0/10, RFC 6598, which the
+    explicit ranges miss). IPv4-mapped IPv6 addresses (e.g. ::ffff:127.0.0.1) are
+    unwrapped first so they cannot bypass the check.
+    """
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+        # Catch-all for anything not a globally-routable public address
+        # (e.g. CGNAT 100.64.0.0/10, RFC 6598), which the explicit ranges miss.
+        or not ip.is_global
+    )
+
+
+async def _resolve_host_ips(
+    host: str,
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve ``host`` to IP objects for SSRF screening.
+
+    An IP literal is parsed directly (no DNS). A name is resolved via the event
+    loop's threaded ``getaddrinfo``; ALL returned addresses are screened so a
+    name that resolves to both a public and a private address is still blocked.
+    A name that does not resolve returns an empty list and is allowed through:
+    it is unreachable anyway, so it is not an SSRF target (this also keeps the
+    guard inert for the synthetic hostnames used in tests).
+    """
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None)
+    except socket.gaierror:
+        return []
+    out: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        try:
+            out.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    return out
+
+
+async def _ssrf_guard(request: httpx.Request) -> None:
+    """httpx *request* event hook: block SSRF before every (redirected) request.
+
+    Fires for the initial request AND for every redirect hop, so a 3xx pivot to
+    an internal host is rejected too. Raises ``HabrApiError`` (Russian) when the
+    target host resolves to any blocked address. Scheme is screened earlier in
+    ``fetch_resource``; redirect hops to a non-http(s) scheme are rejected by
+    httpx itself.
+
+    Residual risk: this resolve-then-connect design does NOT fully close
+    DNS-rebinding / TOCTOU. A malicious resolver can return a public IP to this
+    guard and a private IP to httpx's own connect-time resolution. Closing it
+    fully would require pinning the validated IP for the actual connection; that
+    is out of scope here and the residual risk is accepted.
+    """
+    host = request.url.host
+    if not host:
+        return
+    for ip in await _resolve_host_ips(host):
+        if _ip_is_blocked(ip):
+            raise HabrApiError(
+                f"Заблокирован доступ к внутреннему адресу {host} ({ip}) — "
+                "SSRF-защита: разрешены только публичные http(s)-хосты."
+            )
 
 
 def _validate_announce_length(text: str) -> None:
@@ -928,6 +1011,23 @@ class HabrClient:
         if uri.startswith("data:"):
             data, media = _decode_data_uri(uri)
             return data, media
+        # Only public http(s) URLs may hit the network (data: handled above).
+        # Reject other schemes (file:, ftp:, gopher:, …) with a clear message
+        # before any client work; host/IP screening happens in _ssrf_guard.
+        # A malformed URL (e.g. a bad IPv6 literal) makes urlsplit raise
+        # ValueError; wrap it as HabrApiError so it surfaces cleanly, exactly as
+        # the transport-error path below would.
+        try:
+            scheme = urlsplit(uri).scheme.lower()
+        except ValueError as exc:
+            raise HabrApiError(
+                f"Не удалось загрузить ресурс {uri}: {exc}"
+            ) from exc
+        if scheme not in ("http", "https"):
+            raise HabrApiError(
+                f"Недопустимая схема URI ресурса {uri!r}: разрешены только "
+                "http(s) и data:."
+            )
         owns_client = client is None
         if owns_client:
             client = httpx.AsyncClient(
@@ -935,6 +1035,7 @@ class HabrClient:
                 proxy=self._settings.proxy or None,
                 headers={"User-Agent": self._settings.user_agent},
                 follow_redirects=True,
+                event_hooks={"request": [_ssrf_guard]},
             )
         try:
             response = await client.get(uri)
@@ -1017,6 +1118,7 @@ class HabrClient:
             proxy=self._settings.proxy or None,
             headers={"User-Agent": self._settings.user_agent},
             follow_redirects=True,
+            event_hooks={"request": [_ssrf_guard]},
         ) as shared_client:
             await asyncio.gather(*(process(src, shared_client) for src in srcs))
 
