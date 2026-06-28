@@ -52,8 +52,6 @@ class Settings(BaseSettings):
     habr_cookie: str | None = None
     # Value for the `habr-user-uuid` request header (mirrors the habr_uuid cookie).
     habr_user_uuid: str | None = None
-    # Value for the `x-app-version` request header (Habr frontend version).
-    habr_x_app_version: str = "2.329.0"
     # httpx request timeout in seconds.
     request_timeout: float = 20.0
     # Optional HTTP/SOCKS proxy URL passed straight to httpx.

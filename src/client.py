@@ -287,14 +287,64 @@ class HabrClient:
         lang = settings.habr_lang
         # `fl` = content/flow language, `hl` = interface language; sent on every GET.
         self._default_params: dict[str, str] = {"fl": lang, "hl": lang}
+        # Current known Habr frontend version, learned from the `server-habr-version`
+        # response header (see _capture_app_version / _ensure_app_version). None until
+        # the first response teaches it; the header is omitted while still unknown.
+        self._app_version: str | None = None
+        # Serializes the one-time version bootstrap so concurrent author calls on a
+        # fresh client fire a single `me` probe instead of one per caller.
+        self._app_version_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             timeout=settings.request_timeout,
             headers={"User-Agent": settings.user_agent},
             proxy=settings.proxy or None,
+            event_hooks={"response": [self._capture_app_version]},
         )
 
     # -- low-level helpers --------------------------------------------------
+
+    async def _capture_app_version(self, response: httpx.Response) -> None:
+        """Track Habr's current frontend version from each API response.
+
+        Habr echoes its live frontend build in the `server-habr-version`
+        response header on every kek/v2 response. Mirroring it back as the
+        `x-app-version` request header keeps the client in lockstep with the
+        real frontend instead of a stale hardcoded value. Reads only headers,
+        so it never consumes the response body/stream.
+        """
+        raw = response.headers.get("server-habr-version")
+        if not raw:
+            return
+        version = raw.strip()
+        # Only trust a sane version token (e.g. "2.329.0"); ignore junk/error-page
+        # values so a malformed header can't poison every later author request.
+        if re.fullmatch(r"\d+(?:\.\d+){1,3}", version):
+            self._app_version = version
+
+    async def _ensure_app_version(self) -> None:
+        """Learn Habr's current frontend version before sending it.
+
+        A browser never ships a hardcoded version: Habr serves the current
+        frontend on every load and that code reports its own version. The
+        API-client equivalent is to learn it from Habr. If the version is still
+        unknown (no prior response seen yet), make one cheap GET so the
+        response hook captures `server-habr-version`. Best-effort: on network
+        failure we proceed without the header (Habr does not enforce it).
+        """
+        if self._app_version is not None:
+            return
+        async with self._app_version_lock:
+            # Re-check inside the lock: another task may have just probed.
+            if self._app_version is not None:
+                return
+            try:
+                # Any kek/v2 response carries `server-habr-version`; this raw GET
+                # does NOT go through _author_headers, so there is no recursion.
+                # The response hook (_capture_app_version) populates self._app_version.
+                await self._client.get("me", params=self._default_params)
+            except httpx.HTTPError:
+                pass
 
     @staticmethod
     def _check(data: Any) -> Any:
@@ -326,24 +376,28 @@ class HabrClient:
         cookie = f"connect.sid={sid}; {cookie_name}={token}"
         return {"Cookie": cookie, "csrf-token": token}
 
-    def _author_headers(self, referer: str | None = None) -> dict[str, str]:
+    async def _author_headers(self, referer: str | None = None) -> dict[str, str]:
         """Build the header bundle for ``publication/…`` author endpoints.
 
         Author endpoints need the full browser Cookie header plus the csrf-token;
-        see protocol §2. Raises if either is missing.
+        see protocol §2. Raises if either is missing. The `x-app-version` header
+        is learned from Habr on first use and omitted while still unknown.
         """
         cookie = self._settings.habr_cookie
         token = self._settings.habr_csrf_token
+        # Check credentials FIRST so a credential-less call does not waste a probe.
         if not cookie or not token:
             raise HabrApiError(AUTHOR_MISSING_CREDS_MESSAGE)
+        await self._ensure_app_version()
         headers: dict[str, str] = {
             "Cookie": cookie,
             "csrf-token": token,
             "accept": "application/json, text/plain, */*",
-            "x-app-version": self._settings.habr_x_app_version,
             "origin": "https://habr.com",
             "referer": referer or "https://habr.com/ru/article/edit/",
         }
+        if self._app_version:
+            headers["x-app-version"] = self._app_version
         if self._settings.habr_user_uuid:
             headers["habr-user-uuid"] = self._settings.habr_user_uuid
         return headers
@@ -598,7 +652,7 @@ class HabrClient:
         result = await self._post(
             "publication/save",
             json=form,
-            extra_headers=self._author_headers(
+            extra_headers=await self._author_headers(
                 referer="https://habr.com/ru/articles/new/"
             ),
         )
@@ -646,7 +700,7 @@ class HabrClient:
         """Read a draft/post form via ``publication/post-data/<id>``."""
         return await self._get(
             f"publication/post-data/{post_id}",
-            extra_headers=self._author_headers(
+            extra_headers=await self._author_headers(
                 referer=f"https://habr.com/ru/article/edit/{post_id}/"
             ),
         )
@@ -657,7 +711,7 @@ class HabrClient:
         Used to resolve the author's own alias for endpoints that require a
         ``user`` query param (e.g. the drafts list). Returns the parsed dict.
         """
-        return await self._get("me", extra_headers=self._author_headers())
+        return await self._get("me", extra_headers=await self._author_headers())
 
     async def list_drafts(
         self, page: int = 1, draft_type: str = "posts"
@@ -684,7 +738,7 @@ class HabrClient:
             "perPage": self._settings.per_page,
         }
         return await self._get(
-            "articles/drafts", params, extra_headers=self._author_headers()
+            "articles/drafts", params, extra_headers=await self._author_headers()
         )
 
     async def update_draft(
@@ -781,7 +835,7 @@ class HabrClient:
         result = await self._post(
             f"publication/save/{post_id}",
             json=form,
-            extra_headers=self._author_headers(
+            extra_headers=await self._author_headers(
                 referer=f"https://habr.com/ru/article/edit/{post_id}/"
             ),
         )
@@ -833,7 +887,7 @@ class HabrClient:
             f"articles/drafts/{post_id}/posts",
             json={},
             method="DELETE",
-            extra_headers=self._author_headers(
+            extra_headers=await self._author_headers(
                 referer=f"https://habr.com/ru/article/edit/{post_id}/"
             ),
         )
@@ -850,7 +904,7 @@ class HabrClient:
         return await self._get(
             "publication/suggest-hubs",
             params,
-            extra_headers=self._author_headers(),
+            extra_headers=await self._author_headers(),
         )
 
     async def list_flows(self, publication_id: int | None = None) -> dict[str, Any]:
@@ -861,7 +915,7 @@ class HabrClient:
         return await self._get(
             "refs/flows/wysiwyg",
             params,
-            extra_headers=self._author_headers(),
+            extra_headers=await self._author_headers(),
         )
 
     async def upload_image(
@@ -876,7 +930,7 @@ class HabrClient:
         """
         # Author headers minus Content-Type so httpx sets the multipart boundary.
         headers = {
-            k: v for k, v in self._author_headers().items() if k.lower() != "content-type"
+            k: v for k, v in (await self._author_headers()).items() if k.lower() != "content-type"
         }
         headers["Accept"] = "application/json"
         try:

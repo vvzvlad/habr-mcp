@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
+import respx
 
 from src.settings import Settings
 
 BASE_URL = "https://habr.com/kek/v2/"
+
+
+@pytest.fixture(autouse=True)
+def default_app_version_probe():
+    """Provide a default `me` response so the author bootstrap probe succeeds.
+
+    Author endpoints now learn `x-app-version` from Habr on first use via a one-off
+    GET to `me` (see HabrClient._ensure_app_version). This autouse fixture registers
+    a default `me` route carrying `server-habr-version` so existing author tests do
+    not hit respx's "not mocked" error during that probe. It composes with each
+    test's own `@respx.mock` router; a test that registers its own `me` route
+    overrides this default. Unused, it is harmless (assert_all_called is off).
+    """
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(
+            200, json={"alias": "x"}, headers={"server-habr-version": "2.329.0"}
+        )
+    )
+    yield
 
 
 @pytest.fixture

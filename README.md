@@ -58,7 +58,6 @@ Server-level (shared, non-secret) variables:
 | `HABR_MCP_PORT` | HTTP bind port | `8765` |
 | `HABR_MCP_STATE_DIR` | Directory for the encrypted credential store | `data` |
 | `HABR_LANG` | Content (`fl`) and interface (`hl`) language | `ru` |
-| `HABR_X_APP_VERSION` | Value for the `x-app-version` request header | `2.329.0` |
 | `PROXY` | HTTP/SOCKS proxy URL for httpx | empty |
 | `REQUEST_TIMEOUT` | httpx request timeout, seconds | `20` |
 | `PER_PAGE` | Page size for feeds / search | `20` |

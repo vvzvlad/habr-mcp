@@ -60,7 +60,6 @@ MCP-клиенты подключаются к `https://<host>/mcp`. watchtower 
 | `HABR_MCP_PORT` | Порт привязки HTTP | `8765` |
 | `HABR_MCP_STATE_DIR` | Каталог зашифрованного хранилища учётных данных | `data` |
 | `HABR_LANG` | Язык контента (`fl`) и интерфейса (`hl`) | `ru` |
-| `HABR_X_APP_VERSION` | Значение заголовка запроса `x-app-version` | `2.329.0` |
 | `PROXY` | URL HTTP/SOCKS-прокси для httpx | пусто |
 | `REQUEST_TIMEOUT` | Тайм-аут запроса httpx, секунды | `20` |
 | `PER_PAGE` | Размер страницы для лент / поиска | `20` |

@@ -25,7 +25,7 @@ class ClientRegistry:
     """Builds and caches a ``HabrClient`` per bearer token.
 
     The base ``Settings`` carries the shared, non-secret config (language,
-    proxy, timeout, user agent, page size, x-app-version). Per-user secrets
+    proxy, timeout, user agent, page size). Per-user secrets
     (cookie/csrf/uuid) are layered on top from the ``CredStore``.
     """
 

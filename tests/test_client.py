@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -306,22 +308,158 @@ async def test_empty_2xx_body_is_success(auth_settings):
 # -- author layer: drafts ----------------------------------------------------
 
 
-def test_author_headers_without_creds_raises(anon_settings):
+@respx.mock
+async def test_author_headers_without_creds_raises(anon_settings):
+    # The credential check runs before the version probe, so a credential-less
+    # call raises immediately (and wastes no probe request).
     client = HabrClient(anon_settings)
-    with pytest.raises(HabrApiError) as exc:
-        client._author_headers()
-    assert str(exc.value) == AUTHOR_MISSING_CREDS_MESSAGE
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client._author_headers()
+        assert str(exc.value) == AUTHOR_MISSING_CREDS_MESSAGE
+    finally:
+        await client.aclose()
 
 
-def test_author_headers_have_full_bundle(author_settings):
+@respx.mock
+async def test_author_headers_have_full_bundle(author_settings):
+    # The version is learned from Habr on first use; mock `me` to teach it.
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(
+            200, json=None, headers={"server-habr-version": "2.329.0"}
+        )
+    )
     client = HabrClient(author_settings)
-    headers = client._author_headers(referer="https://habr.com/ru/articles/new/")
-    assert headers["csrf-token"] == "CSRF456"
-    assert headers["habr-user-uuid"] == "uuid-1"
-    assert headers["x-app-version"] == "2.329.0"
-    assert headers["accept"] == "application/json, text/plain, */*"
-    assert headers["Cookie"].startswith("connect_sid=")
-    assert headers["referer"] == "https://habr.com/ru/articles/new/"
+    try:
+        headers = await client._author_headers(
+            referer="https://habr.com/ru/articles/new/"
+        )
+        assert headers["csrf-token"] == "CSRF456"
+        assert headers["habr-user-uuid"] == "uuid-1"
+        assert headers["x-app-version"] == "2.329.0"
+        assert headers["accept"] == "application/json, text/plain, */*"
+        assert headers["Cookie"].startswith("connect_sid=")
+        assert headers["referer"] == "https://habr.com/ru/articles/new/"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_author_headers_omits_version_when_unknown(author_settings):
+    # Bootstrap probe yields no `server-habr-version` => version stays unknown and
+    # the `x-app-version` header is omitted, while the rest of the bundle is present.
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(200, json={"alias": "x"})
+    )
+    client = HabrClient(author_settings)
+    try:
+        headers = await client._author_headers()
+        assert "x-app-version" not in headers
+        assert client._app_version is None
+        assert headers["csrf-token"] == "CSRF456"
+        assert headers["habr-user-uuid"] == "uuid-1"
+        assert headers["accept"] == "application/json, text/plain, */*"
+        assert headers["Cookie"].startswith("connect_sid=")
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_author_headers_omits_version_when_probe_fails(author_settings):
+    # A network failure during the bootstrap probe is best-effort: the version
+    # stays unknown and the header is simply omitted (Habr does not enforce it).
+    respx.get(f"{BASE_URL}me").mock(
+        side_effect=httpx.ConnectError("boom")
+    )
+    client = HabrClient(author_settings)
+    try:
+        headers = await client._author_headers()
+        assert "x-app-version" not in headers
+        assert client._app_version is None
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_app_version_auto_updates_from_response_header(author_settings):
+    # Habr echoes its live frontend build in `server-habr-version`; the response
+    # hook must learn it and feed it back as `x-app-version` on author endpoints.
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(
+            200, json={"alias": "x"}, headers={"server-habr-version": "9.9.9"}
+        )
+    )
+    client = HabrClient(author_settings)
+    try:
+        # No hardcoded seed: the version is unknown until learned from Habr.
+        assert client._app_version is None
+        await client.get_me()
+        # The response hook captured the live version.
+        assert client._app_version == "9.9.9"
+        # New header bundles now carry the auto-updated version.
+        assert (await client._author_headers())["x-app-version"] == "9.9.9"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_app_version_unchanged_when_header_missing(author_settings):
+    # No `server-habr-version` header -> the version stays unknown (None).
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(200, json={"alias": "x"})
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.get_me()
+        assert client._app_version is None
+        assert "x-app-version" not in await client._author_headers()
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+@pytest.mark.parametrize("bad_value", ["   ", "nope", "1", "1.2.3.4.5", ""])
+async def test_app_version_unchanged_on_garbage_header(author_settings, bad_value):
+    # Whitespace-only or non-version tokens must not poison `x-app-version`;
+    # the version stays unknown and the header is omitted.
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(
+            200, json={"alias": "x"}, headers={"server-habr-version": bad_value}
+        )
+    )
+    client = HabrClient(author_settings)
+    try:
+        await client.get_me()
+        assert client._app_version is None
+        assert "x-app-version" not in await client._author_headers()
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_concurrent_author_calls_probe_me_once(author_settings):
+    # Concurrent author calls on a fresh client must collapse to a single `me`
+    # probe thanks to the double-checked lock in _ensure_app_version.
+    # The mock yields the event loop (await asyncio.sleep(0)) BEFORE responding,
+    # so all five gathered tasks reach the `await GET me` point before any of
+    # them sets the version. Without the lock this yields call_count == 5; with
+    # it, the four waiters re-check inside the lock and skip — so the test
+    # genuinely fails if the lock is removed (an instant mock would pass either
+    # way and prove nothing).
+    async def _slow_me(request):
+        await asyncio.sleep(0)
+        return httpx.Response(
+            200, json=None, headers={"server-habr-version": "2.330.0"}
+        )
+
+    me_route = respx.get(f"{BASE_URL}me").mock(side_effect=_slow_me)
+    client = HabrClient(author_settings)
+    try:
+        await asyncio.gather(*[client._author_headers() for _ in range(5)])
+        assert me_route.call_count == 1
+        assert client._app_version == "2.330.0"
+    finally:
+        await client.aclose()
 
 
 @respx.mock
@@ -330,6 +468,13 @@ async def test_create_draft_hits_save_no_id(author_settings, docmost_doc):
 
     route = respx.post(f"{BASE_URL}publication/save").mock(
         return_value=httpx.Response(200, json={"post": "555", "ok": True})
+    )
+    # The author path learns `x-app-version` from Habr first; the bootstrap probe
+    # hits `me`, which must report a version for the save request to carry it.
+    respx.get(f"{BASE_URL}me").mock(
+        return_value=httpx.Response(
+            200, json={"alias": "x"}, headers={"server-habr-version": "2.329.0"}
+        )
     )
     # A distinctive teaser >= 100 chars; it must land in the preview verbatim and
     # the body text ("Привет, Хабр.") must NOT leak into the preview.
