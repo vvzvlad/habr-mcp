@@ -12,9 +12,14 @@ from src.client import (
     HabrApiError,
     HabrClient,
     _cookie_interface_lang,
+    _decode_data_uri,
+    _upload_filename,
+    _validate_announce_length,
     fetch_csrf_token,
     resource_link_uri,
 )
+from src.converter import serialize_source
+from src.settings import Settings
 
 BASE_URL = "https://habr.com/kek/v2/"
 
@@ -1471,3 +1476,279 @@ def test_cookie_interface_lang_rejects_malformed():
     assert _cookie_interface_lang("hl=en/feed") == "ru"
     assert _cookie_interface_lang("hl=EN") == "ru"
     assert _cookie_interface_lang("hl=en") == "en"
+
+
+# -- upload_image response shapes --------------------------------------------
+
+
+@respx.mock
+async def test_upload_image_src_key_in_body(author_settings):
+    # A body carrying only "src" (no "url") must still be accepted.
+    url = "https://habrastorage.org/getpro/habr/src-shape"
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"src": url})
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert result == url
+
+
+@respx.mock
+async def test_upload_image_nested_data_url(author_settings):
+    # A nested {"data": {"url": ...}} body must be unwrapped.
+    url = "https://habrastorage.org/getpro/habr/nested"
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"data": {"url": url}})
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert result == url
+
+
+@respx.mock
+async def test_upload_image_regex_fallback_in_json_text(author_settings):
+    # A JSON body with no usable url falls back to the habrastorage regex over
+    # the raw response text (which still contains the URL).
+    # The regex captures \S+ greedily, so the URL must end at a whitespace
+    # boundary; JSON serializes the value as "<url>", whose closing quote is the
+    # next char. Append a space inside the value so the match stops cleanly.
+    url = "https://habrastorage.org/getpro/habr/regex-json"
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"ok": True, "location": f"{url} "})
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert result == url
+
+
+@respx.mock
+async def test_upload_image_regex_fallback_non_json_body(author_settings):
+    # A non-JSON (HTML) body containing a habrastorage URL is matched by regex.
+    # The regex captures \S+ greedily, so the URL must be whitespace-delimited.
+    url = "https://habrastorage.org/getpro/habr/regex-html"
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, text=f"uploaded to {url} done")
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert result == url
+
+
+@respx.mock
+async def test_upload_image_non_json_no_match_returns_none(author_settings):
+    # A non-JSON body with no habrastorage URL yields None (clean failure).
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, text="<html>no link here</html>")
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert result is None
+
+
+@respx.mock
+async def test_upload_image_transport_error_returns_none(author_settings):
+    # Transport errors are swallowed (publish must not abort): returns None.
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        side_effect=httpx.ConnectError("boom")
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert result is None
+
+
+@respx.mock
+async def test_upload_image_dict_no_url_no_match_returns_none(author_settings):
+    # A dict body with no url AND raw text with no habrastorage match -> None.
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        result = await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert result is None
+
+
+# -- _upload_filename: content-type -> extension -----------------------------
+
+
+def test_upload_filename_extensionless_url_uses_content_type():
+    base = "https://h/api/sb/3f2a-uuid"
+    assert _upload_filename(base, "image/gif") == "image.gif"
+    assert _upload_filename(base, "image/webp") == "image.webp"
+    assert _upload_filename(base, "image/svg+xml") == "image.svg"
+
+
+def test_upload_filename_data_uri_uses_content_type():
+    assert _upload_filename("data:image/png;base64,AAA", "image/png") == "image.png"
+    assert _upload_filename("data:image/jpeg;base64,AAA", "image/jpeg") == "image.jpg"
+
+
+def test_upload_filename_unknown_type_falls_back_to_png():
+    # An extensionless URL with an unknown/None content type defaults to image.png.
+    assert _upload_filename("https://h/api/sb/uuid", "application/octet-stream") == "image.png"
+    assert _upload_filename("https://h/api/sb/uuid", None) == "image.png"
+
+
+def test_upload_filename_keeps_existing_extension():
+    # A URL with a real extension keeps its own filename, regardless of type.
+    assert _upload_filename("https://cdn.example.com/img/abc.png", "image/jpeg") == "abc.png"
+
+
+# -- _decode_data_uri: base64 failure ----------------------------------------
+
+
+def test_decode_data_uri_invalid_base64_raises():
+    # A base64 payload with bad padding raises binascii.Error -> HabrApiError.
+    with pytest.raises(HabrApiError):
+        _decode_data_uri("data:;base64,A")
+
+
+# -- _validate_announce_length: upper bound (off-by-one) ----------------------
+
+
+def test_validate_announce_length_over_max_raises():
+    with pytest.raises(HabrApiError) as exc:
+        _validate_announce_length("А" * 3001)
+    message = str(exc.value)
+    assert "слишком длинный" in message
+    assert "3000" in message
+
+
+def test_validate_announce_length_at_max_ok():
+    # Exactly 3000 chars is the upper boundary and must NOT raise.
+    _validate_announce_length("А" * 3000)
+
+
+# -- _auth_headers: full cookie+token priority over legacy connect.sid --------
+
+
+def test_auth_headers_full_cookie_beats_legacy_connect_sid():
+    # When both the full habr_cookie+token and the legacy connect_sid are set,
+    # the full Cookie header wins verbatim (never the connect.sid construction).
+    settings = Settings(
+        habr_lang="ru",
+        habr_cookie="connect_sid=full; hsec_id=x",
+        habr_csrf_token="CSRF",
+        habr_connect_sid="LEGACYSID",
+        habr_csrf_cookie_name="csrf_token",
+        proxy=None,
+        per_page=20,
+    )
+    client = HabrClient(settings)
+    headers = client._auth_headers()
+    assert headers["Cookie"] == "connect_sid=full; hsec_id=x"
+    assert "connect.sid=LEGACYSID" not in headers["Cookie"]
+    assert headers["csrf-token"] == "CSRF"
+
+
+# -- integration: uncovered branches -----------------------------------------
+
+
+@respx.mock
+async def test_reupload_upload_failed_warns(author_settings):
+    # The image fetch succeeds but the upload returns no usable url and no regex
+    # match: the mapping stays empty and an "image upload failed" warning is added
+    # (distinct from the fetch-failure path).
+    image_url = "https://cdn.example.com/img/upfail.png"
+    respx.get(image_url).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        mapping, warnings = await client._reupload_images(_image_doc(image_url))
+    finally:
+        await client.aclose()
+
+    assert mapping == {}
+    assert warnings and any(
+        "image upload failed" in w and image_url in w for w in warnings
+    )
+
+
+@respx.mock
+async def test_create_draft_preview_doc_skips_announce_validation(author_settings, docmost_doc):
+    # When a preview_doc is supplied the announce is None and validation is
+    # skipped: the save succeeds without any announce error.
+    import json as json_module
+
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "777", "ok": True})
+    )
+    preview_doc = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Тизер"}]}
+        ],
+    }
+    client = HabrClient(author_settings)
+    try:
+        result = await client.create_draft(
+            "Заголовок",
+            docmost_doc,
+            hubs=[19791],
+            tags=["t1"],
+            flow=2,
+            announce=None,
+            preview_doc=preview_doc,
+        )
+    finally:
+        await client.aclose()
+
+    assert save_route.called
+    body = json_module.loads(save_route.calls.last.request.content)
+    # The preview is built from preview_doc, not the (absent) announce.
+    assert body["preview"]["source"] == serialize_source(preview_doc)
+    assert result["response"] == {"post": "777", "ok": True}
+
+
+@respx.mock
+async def test_update_draft_preview_doc_rebuilds_preview(author_settings, post_data_payload):
+    # A supplied preview_doc rebuilds the preview from that doc with editorVersion 2.
+    import json as json_module
+
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    preview_doc = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Новый тизер"}]}
+        ],
+    }
+    client = HabrClient(author_settings)
+    try:
+        await client.update_draft(42, preview_doc=preview_doc)
+    finally:
+        await client.aclose()
+
+    body = json_module.loads(save_route.calls.last.request.content)
+    assert body["preview"]["source"] == serialize_source(preview_doc)
+    assert body["preview"]["editorVersion"] == 2

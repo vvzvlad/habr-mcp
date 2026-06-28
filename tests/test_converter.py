@@ -1332,3 +1332,657 @@ def test_make_preview_doc_cap_keeps_most_when_only_early_space():
     text = preview["content"][0]["content"][0]["text"]
     assert len(text) <= 3000
     assert len(text) >= 1500  # not collapsed to "См"
+
+
+# ==========================================================================
+# Phase 3: robustness ("dirty input does not crash") + targeted edge cases
+# ==========================================================================
+
+import pytest  # noqa: E402
+from hypothesis import HealthCheck, given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+from src.converter import (  # noqa: E402
+    _PREVIEW_MAX_CHARS,
+    _build_image,
+    _build_table_cell,
+    _convert_inline,
+    _convert_details,
+    _min_heading_level,
+    image_src_key,
+)
+
+# Docmost-only node-name tokens that must never leak into the Habr output.
+# REUSED from test_converted_doc_never_contains_docmost_node_names; "table" is
+# intentionally excluded because Habr nests a valid {"type":"table"} inside
+# table_wrapper.
+_FORBIDDEN_DOCMOST_NAMES = (
+    "tableRow",
+    "tableCell",
+    "mathBlock",
+    "mathInline",
+    "youtube",
+)
+
+
+def _valid_sibling() -> dict:
+    """A simple, always-surviving Docmost paragraph used to prove that a bad
+    sibling is skipped without taking the rest of the doc down with it."""
+    return {"type": "paragraph", "content": [_text("survivor")]}
+
+
+def _sibling_survives(out: dict) -> bool:
+    """True if the valid sibling paragraph made it into the converted output."""
+    for block in out["content"]:
+        if block.get("type") != "paragraph":
+            continue
+        for inline in block.get("content") or []:
+            if inline.get("text") == "survivor":
+                return True
+    return False
+
+
+# --- (HIGH) parametric: malformed pieces are silently skipped, never crash ----
+#
+# Each case wraps a malformed fragment inside an otherwise-valid doc. The bad
+# element must be dropped, the conversion must not raise, and the valid sibling
+# paragraph must survive. The guard line each case exercises is noted.
+_DIRTY_INPUT_CASES = [
+    # A non-dict top-level block (line 669: _convert_blocks skips non-dicts).
+    ("non_dict_block", _doc("i am a string, not a block", _valid_sibling())),
+    # A non-dict inline node inside a paragraph (line 321: _convert_inline skips).
+    (
+        "non_dict_inline",
+        _doc(
+            {"type": "paragraph", "content": ["bad-inline", _text("survivor")]},
+            _valid_sibling(),
+        ),
+    ),
+    # A string (non-dict) table cell child (line 600: _build_table loop skips it).
+    (
+        "non_dict_table_cell",
+        _doc(
+            {
+                "type": "table",
+                "content": [
+                    {
+                        "type": "tableRow",
+                        "content": ["not-a-cell", _table_cell("tableCell", "ok")],
+                    }
+                ],
+            },
+            _valid_sibling(),
+        ),
+    ),
+    # A non-dict mark inside a text node (line 225: _convert_marks skips it).
+    (
+        "non_dict_mark",
+        _doc(
+            {"type": "paragraph", "content": [_text("survivor", ["not-a-mark"])]},
+        ),
+    ),
+    # A non-dict child inside a codeBlock (line 388: _collect_code_text guards).
+    (
+        "non_dict_code_node_child",
+        _doc(
+            {"type": "codeBlock", "content": ["raw", _text("real")]},
+            _valid_sibling(),
+        ),
+    ),
+    # A non-dict child inside a tableCell (line 560: _build_table_cell skips it).
+    (
+        "non_dict_cell_child",
+        _doc(
+            {
+                "type": "table",
+                "content": [
+                    {
+                        "type": "tableRow",
+                        "content": [
+                            {
+                                "type": "tableCell",
+                                "content": [
+                                    "stray",
+                                    {"type": "paragraph", "content": [_text("cellok")]},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+            _valid_sibling(),
+        ),
+    ),
+    # A non-dict table row (line 596: _build_table skips rows that aren't dicts).
+    (
+        "non_dict_table_row",
+        _doc(
+            {
+                "type": "table",
+                "content": [
+                    "not-a-row",
+                    {
+                        "type": "tableRow",
+                        "content": [_table_cell("tableCell", "rowok")],
+                    },
+                ],
+            },
+            _valid_sibling(),
+        ),
+    ),
+    # A non-dict child inside an unknown wrapper that gets flattened
+    # (line 666: _convert_blocks bails to [] for a non-list, here we feed a
+    # mixed list so the non-dict member is skipped but valid ones survive).
+    (
+        "non_dict_in_flattened_wrapper",
+        _doc(
+            {
+                "type": "columns",
+                "content": ["junk", {"type": "paragraph", "content": [_text("col")]}],
+            },
+            _valid_sibling(),
+        ),
+    ),
+    # A non-dict child inside a details node (line 826/827: _convert_details
+    # skips non-dict children before checking detailsSummary/detailsContent).
+    (
+        "non_dict_details_child",
+        _doc(
+            {
+                "type": "details",
+                "content": [
+                    "junk",
+                    {
+                        "type": "detailsContent",
+                        "content": [{"type": "paragraph", "content": [_text("d")]}],
+                    },
+                ],
+            },
+            _valid_sibling(),
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case_name,dirty_doc",
+    _DIRTY_INPUT_CASES,
+    ids=[name for name, _ in _DIRTY_INPUT_CASES],
+)
+def test_dirty_input_does_not_crash_and_sibling_survives(case_name, dirty_doc):
+    # Malformed fragment must be silently dropped; the doc must still convert to a
+    # valid {"type":"doc","content":[...]} and the valid sibling must survive.
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(dirty_doc, {}, warnings)
+    assert out["type"] == "doc"
+    assert isinstance(out["content"], list)
+    assert _sibling_survives(out)
+
+
+# --- non-numeric heading level -> fallback to 1 ------------------------------
+
+
+def test_heading_non_numeric_level_falls_back_to_one():
+    # A heading whose attrs.level is non-numeric ("abc") must not raise and must
+    # normalize to Habr level 1 (distinct from the missing-level case).
+    src = _doc({"type": "heading", "attrs": {"level": "abc"}, "content": [_text("H")]})
+    heading = docmost_to_habr_doc(src)["content"][0]
+    assert heading["type"] == "heading"
+    assert heading["attrs"]["level"] == 1
+
+
+def test_min_heading_level_non_numeric_level_counts_as_one():
+    # _min_heading_level treats a non-numeric level as 1 (the try/except branch).
+    doc = _doc(
+        {"type": "heading", "attrs": {"level": "xyz"}, "content": [_text("A")]},
+        {"type": "heading", "attrs": {"level": 4}, "content": [_text("B")]},
+    )
+    assert _min_heading_level(doc) == 1
+
+
+# --- _build_image: non-numeric width/height -> None --------------------------
+
+
+def test_build_image_non_numeric_dims_become_none():
+    # width/height that cannot be coerced to int fall back to None; the image is
+    # still emitted because its src is present in the map.
+    node = {
+        "type": "image",
+        "attrs": {"src": "orig://x", "width": "wide", "height": "tall"},
+    }
+    img = _build_image(node, {"orig://x": "https://habrastorage/x.jpg"}, None)
+    assert img is not None
+    assert img["attrs"]["src"] == "https://habrastorage/x.jpg"
+    assert img["attrs"]["width"] is None
+    assert img["attrs"]["height"] is None
+
+
+# --- _build_table_cell: non-numeric colspan -> 1 -----------------------------
+
+
+def test_build_table_cell_non_numeric_colspan_falls_back_to_one():
+    # A colspan that cannot be coerced to int defaults to 1 (rowspan default too).
+    node = {
+        "type": "tableCell",
+        "attrs": {"colspan": "lots", "colwidth": [80]},
+        "content": [{"type": "paragraph", "content": [_text("c")]}],
+    }
+    cell = _build_table_cell(node, None, set())
+    assert cell["type"] == "table_cell"
+    assert cell["attrs"]["colspan"] == 1
+    assert cell["attrs"]["rowspan"] == 1
+    assert cell["attrs"]["colwidth"] == [80]
+
+
+# --- _convert_inline: unknown inline atom dropped with warning ---------------
+
+
+def test_convert_inline_unknown_atom_dropped_with_warning():
+    # An inline node of an unknown type is dropped (with a warning) while the
+    # surrounding valid text nodes are preserved.
+    children = [
+        _text("before "),
+        {"type": "weirdInline", "attrs": {"x": 1}},
+        _text(" after"),
+    ]
+    warnings: list[str] = []
+    out = _convert_inline(children, warnings, set())
+    assert out == [
+        {"type": "text", "text": "before "},
+        {"type": "text", "text": " after"},
+    ]
+    assert any("unsupported inline dropped: weirdInline" in w for w in warnings)
+
+
+# --- resource_link image src: rewrite + key ----------------------------------
+
+
+def test_image_resource_link_src_rewritten_via_map():
+    # A doc whose image attrs.src is a resource_link dict keyed by its uri in the
+    # map: the emitted image uses the rewritten habrastorage URL.
+    uri = "https://blobs.example.com/img/p.png"
+    link = {"type": "resource_link", "uri": uri, "mimeType": "image/png"}
+    src = _doc({"type": "image", "attrs": {"src": link, "alt": "A"}})
+    out = docmost_to_habr_doc(src, image_url_map={uri: "https://habrastorage/p.png"})
+    img = out["content"][0]
+    assert img["type"] == "image"
+    assert img["attrs"]["src"] == "https://habrastorage/p.png"
+    assert img["attrs"]["alt"] == "A"
+
+
+def test_image_src_key_resource_link_equals_plain_uri():
+    # image_src_key of a resource_link equals the bare uri string, so the two
+    # dedupe to one key on the collection side.
+    uri = "https://blobs.example.com/img/p.png"
+    link = {"type": "resource_link", "uri": uri, "mimeType": "image/png"}
+    assert image_src_key(link) == uri
+    assert image_src_key(uri) == uri
+    assert image_src_key(link) == image_src_key(uri)
+
+
+# --- _convert_details with no detailsSummary -> default title ----------------
+
+
+def test_convert_details_without_summary_uses_default_title():
+    # A details node lacking a detailsSummary child falls back to the default
+    # Russian spoiler title "Спойлер".
+    node = {
+        "type": "details",
+        "content": [
+            {
+                "type": "detailsContent",
+                "content": [{"type": "paragraph", "content": [_text("body")]}],
+            }
+        ],
+    }
+    spoiler = _convert_details(node, None, None, set())
+    assert spoiler["type"] == "spoiler"
+    assert spoiler["attrs"]["title"] == "Спойлер"
+    assert spoiler["content"][0]["type"] == "paragraph"
+
+
+# --- make_preview_doc: word boundary at exactly _PREVIEW_MAX_CHARS//2 --------
+
+
+def test_make_preview_doc_word_boundary_at_half_off_by_one_edge():
+    # The cap honors a word boundary only when space index > MAX//2. Craft an
+    # announce so the LAST space inside the capped slice lands at exactly MAX//2:
+    # the boundary must be IGNORED (strict >), and the hard cut wins. The result
+    # is still a valid preview doc within the length cap.
+    half = _PREVIEW_MAX_CHARS // 2  # 1500
+    # One space at index `half`, surrounded by non-space runs long enough that
+    # the text exceeds MAX and the capped[:MAX] slice's last space is at `half`.
+    announce = ("a" * half) + " " + ("b" * (_PREVIEW_MAX_CHARS + 200))
+    preview = make_preview_doc(announce)
+    text = preview["content"][0]["content"][0]["text"]
+    assert preview["type"] == "doc"
+    assert len(text) <= _PREVIEW_MAX_CHARS
+    # Boundary at exactly half is NOT honored (strict >), so the text keeps the
+    # hard 3000-char slice rather than collapsing to the first `half` chars.
+    assert len(text) > half
+
+
+def test_make_preview_doc_word_boundary_just_above_half_is_honored():
+    # A space one index ABOVE MAX//2 (so space > MAX//2 is True) IS honored: the
+    # text is trimmed at that boundary (no trailing space).
+    half = _PREVIEW_MAX_CHARS // 2  # 1500
+    # Put the only space at index half+1 so it sits inside the capped slice and
+    # satisfies space > half.
+    announce = ("a" * (half + 1)) + " " + ("b" * (_PREVIEW_MAX_CHARS + 200))
+    preview = make_preview_doc(announce)
+    text = preview["content"][0]["content"][0]["text"]
+    assert len(text) <= _PREVIEW_MAX_CHARS
+    # Honored boundary: trimmed exactly to the run before the space.
+    assert text == "a" * (half + 1)
+    assert not text.endswith(" ")
+
+
+# ==========================================================================
+# Phase 4: property-based tests (hypothesis)
+# ==========================================================================
+#
+# A recursive generator (st.deferred, depth-bounded) mixes KNOWN node types,
+# UNKNOWN type names, and POISON values (non-dict nodes, missing keys,
+# non-numeric attrs). Wrapped as {"type":"doc","content":[...]}. Properties:
+# totality (never raises, always a valid doc), type-dictionary closure (no
+# Docmost names leak), heading-level bounds, serialize round-trip + compactness,
+# and make_preview_doc length cap.
+
+# Bounded text so the suite stays fast (and excludes surrogates for JSON safety).
+_st_text = st.text(
+    alphabet=st.characters(
+        blacklist_categories=("Cs",), min_codepoint=32, max_codepoint=0x2FFF
+    ),
+    max_size=12,
+)
+
+# A mark: known renamable, link, silently-dropped, unknown, or a poison value.
+_st_mark = st.one_of(
+    st.fixed_dictionaries({"type": st.sampled_from(["bold", "italic", "code"])}),
+    st.fixed_dictionaries(
+        {"type": st.just("link"), "attrs": st.fixed_dictionaries({"href": _st_text})}
+    ),
+    st.fixed_dictionaries({"type": st.sampled_from(["highlight", "weirdmark"])}),
+    st.integers(),  # poison: non-dict mark
+)
+
+# An inline node: text (optionally marked), hardBreak, mathInline, an unknown
+# inline atom, and poison values.
+_st_inline = st.one_of(
+    st.builds(
+        lambda t, m: (
+            {"type": "text", "text": t, "marks": m}
+            if m is not None
+            else {"type": "text", "text": t}
+        ),
+        _st_text,
+        st.one_of(st.none(), st.lists(_st_mark, max_size=3)),
+    ),
+    st.just({"type": "hardBreak"}),
+    st.fixed_dictionaries({"type": st.just("mathInline"), "attrs": st.fixed_dictionaries({"text": _st_text})}),
+    st.fixed_dictionaries({"type": st.just("weirdInline")}),
+    st.none(),  # poison: non-dict inline
+    _st_text,  # poison: bare-string inline
+)
+
+# Non-numeric / poison attr values for headings, spans, dims.
+_st_bad_number = st.one_of(st.text(max_size=4), st.none(), st.booleans())
+
+
+def _heading(content):
+    return st.fixed_dictionaries(
+        {
+            "type": st.just("heading"),
+            "attrs": st.fixed_dictionaries(
+                {
+                    "level": st.one_of(
+                        st.integers(min_value=-2, max_value=9), _st_bad_number
+                    )
+                }
+            ),
+            "content": content,
+        }
+    )
+
+
+def _paragraph(content):
+    return st.fixed_dictionaries({"type": st.just("paragraph"), "content": content})
+
+
+def _code_block(content):
+    return st.fixed_dictionaries(
+        {
+            "type": st.just("codeBlock"),
+            "attrs": st.fixed_dictionaries({"language": st.one_of(st.none(), _st_text)}),
+            "content": content,
+        }
+    )
+
+
+def _image():
+    return st.fixed_dictionaries(
+        {
+            "type": st.just("image"),
+            "attrs": st.fixed_dictionaries(
+                {
+                    "src": st.one_of(st.none(), _st_text),
+                    "width": st.one_of(st.integers(), _st_bad_number),
+                    "height": st.one_of(st.integers(), _st_bad_number),
+                }
+            ),
+        }
+    )
+
+
+# Recursive block generator: known wrappers + unknown types + poison, depth<=3.
+_st_block = st.deferred(
+    lambda: st.one_of(
+        _paragraph(st.lists(_st_inline, max_size=4)),
+        _heading(st.lists(_st_inline, max_size=3)),
+        _code_block(st.lists(_st_inline, max_size=3)),
+        _image(),
+        st.just({"type": "horizontalRule"}),
+        # bullet/ordered list -> listItem -> blocks
+        st.fixed_dictionaries(
+            {
+                "type": st.sampled_from(["bulletList", "orderedList"]),
+                "content": st.lists(
+                    st.fixed_dictionaries(
+                        {
+                            "type": st.just("listItem"),
+                            "content": st.lists(_st_block, max_size=2),
+                        }
+                    ),
+                    max_size=2,
+                ),
+            }
+        ),
+        st.fixed_dictionaries(
+            {
+                "type": st.just("blockquote"),
+                "content": st.lists(_st_block, max_size=2),
+            }
+        ),
+        # table -> tableRow -> tableCell -> blocks
+        st.fixed_dictionaries(
+            {
+                "type": st.just("table"),
+                "content": st.lists(
+                    st.fixed_dictionaries(
+                        {
+                            "type": st.just("tableRow"),
+                            "content": st.lists(
+                                st.fixed_dictionaries(
+                                    {
+                                        "type": st.sampled_from(
+                                            ["tableCell", "tableHeader"]
+                                        ),
+                                        "attrs": st.fixed_dictionaries(
+                                            {
+                                                "colspan": st.one_of(
+                                                    st.integers(), _st_bad_number
+                                                ),
+                                                "rowspan": st.one_of(
+                                                    st.integers(), _st_bad_number
+                                                ),
+                                            }
+                                        ),
+                                        "content": st.lists(_st_block, max_size=2),
+                                    }
+                                ),
+                                max_size=2,
+                            ),
+                        }
+                    ),
+                    max_size=2,
+                ),
+            }
+        ),
+        # UNKNOWN block type with random name + (maybe) children.
+        st.fixed_dictionaries(
+            {
+                "type": st.text(
+                    alphabet="abcdefghijklmnop", min_size=1, max_size=8
+                ),
+                "content": st.lists(_st_block, max_size=2),
+            }
+        ),
+        # POISON nodes.
+        st.none(),
+        _st_text,
+        st.integers(),
+        st.dictionaries(keys=_st_text, values=st.integers(), max_size=2),  # no "type"
+    )
+)
+
+
+def _st_docmost_doc():
+    return st.builds(
+        lambda blocks: {"type": "doc", "content": blocks},
+        st.lists(_st_block, max_size=5),
+    )
+
+
+def _walk_types(node):
+    """Yield every node-dict "type" string in the converted Habr tree."""
+    if isinstance(node, dict):
+        t = node.get("type")
+        if isinstance(t, str):
+            yield t
+        for child in node.get("content") or []:
+            yield from _walk_types(child)
+    elif isinstance(node, list):
+        for child in node:
+            yield from _walk_types(child)
+
+
+_PROP_SETTINGS = settings(
+    max_examples=150,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+
+
+# --- (HIGH) totality: never raises, always a valid doc -----------------------
+
+
+@_PROP_SETTINGS
+@given(tree=_st_docmost_doc())
+def test_property_totality_never_raises_returns_valid_doc(tree):
+    out = docmost_to_habr_doc(tree, {}, [])
+    assert isinstance(out, dict)
+    assert out["type"] == "doc"
+    assert isinstance(out["content"], list)
+
+
+# --- (HIGH) type-dictionary closure: no Docmost names leak -------------------
+
+
+@_PROP_SETTINGS
+@given(tree=_st_docmost_doc())
+def test_property_no_docmost_node_names_leak(tree):
+    out = docmost_to_habr_doc(tree, {}, [])
+    source = serialize_source(out)
+    for docmost_name in _FORBIDDEN_DOCMOST_NAMES:
+        # Exact JSON type-token match (so table_row/table_paragraph don't trip).
+        assert f'"type":"{docmost_name}"' not in source
+    # Also walk the structure directly as a second, encoding-independent check.
+    emitted = set(_walk_types(out))
+    assert emitted.isdisjoint(set(_FORBIDDEN_DOCMOST_NAMES))
+
+
+# --- heading levels always in {1,2,3} ----------------------------------------
+
+
+@_PROP_SETTINGS
+@given(tree=_st_docmost_doc())
+def test_property_heading_levels_within_one_to_three(tree):
+    out = docmost_to_habr_doc(tree, {}, [])
+
+    def check(node):
+        if isinstance(node, dict):
+            if node.get("type") == "heading":
+                assert node["attrs"]["level"] in (1, 2, 3)
+            for child in node.get("content") or []:
+                check(child)
+
+    check(out)
+
+
+# --- serialize_source round-trips and stays compact --------------------------
+
+
+@_PROP_SETTINGS
+@given(tree=_st_docmost_doc())
+def test_property_serialize_source_roundtrip_and_compact(tree):
+    out = docmost_to_habr_doc(tree, {}, [])
+    s = serialize_source(out)
+    assert isinstance(s, str)
+    # Round-trip equality.
+    assert json.loads(s) == out
+    # Compact: serialize_source must use the no-space separators. Re-serializing
+    # the parsed value with the compact separators reproduces the string exactly.
+    # (A plain ", "/": " membership check is unsafe — those substrings can occur
+    # legitimately inside string values, e.g. a text node "a, b".)
+    assert s == json.dumps(json.loads(s), ensure_ascii=False, separators=(",", ":"))
+
+
+@_PROP_SETTINGS
+@given(doc=st.recursive(
+    st.one_of(
+        st.none(),
+        st.booleans(),
+        st.integers(),
+        st.text(alphabet=st.characters(blacklist_categories=("Cs",), min_codepoint=33, max_codepoint=0x2FFF), max_size=8),
+    ),
+    lambda children: st.one_of(
+        st.lists(children, max_size=4),
+        st.dictionaries(
+            keys=st.text(alphabet="abcdef", min_size=1, max_size=4),
+            values=children,
+            max_size=4,
+        ),
+    ),
+    max_leaves=20,
+))
+def test_property_serialize_source_roundtrip_arbitrary_json(doc):
+    # serialize_source is a thin json.dumps wrapper: any JSON-serializable value
+    # round-trips exactly (compactness is json.dumps' contract, not asserted on
+    # arbitrary strings which may legitimately contain ", "/": ").
+    s = serialize_source(doc)
+    assert json.loads(s) == doc
+
+
+# --- make_preview_doc: content length <= _PREVIEW_MAX_CHARS -------------------
+
+
+@_PROP_SETTINGS
+@given(announce=st.text(max_size=8000))
+def test_property_make_preview_doc_within_max_chars(announce):
+    preview = make_preview_doc(announce)
+    assert preview["type"] == "doc"
+    assert len(preview["content"]) == 1
+    para = preview["content"][0]
+    assert para["type"] == "paragraph"
+    text = para["content"][0]["text"]
+    assert len(text) <= _PREVIEW_MAX_CHARS

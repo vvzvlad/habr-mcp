@@ -829,3 +829,420 @@ async def test_list_drafts_tool(seeded_server, drafts_payload):
     assert "id=1052760" in out
     assert "Разработка WB-MGE" in out
     assert "поток industrial_engineering" in out
+
+
+# -- Phase 4: extracted pure helper unit tests -------------------------------
+
+
+def test_parse_doc_arg_json_object_string():
+    # A JSON object string decodes to a dict with no error.
+    from src.server import _parse_doc_arg
+
+    parsed, err = _parse_doc_arg('{"type": "doc", "x": 1}')
+    assert parsed == {"type": "doc", "x": 1}
+    assert err is None
+
+
+def test_parse_doc_arg_bytes_input():
+    # ``bytes`` (as fetched from a resource_link) are decoded like a str.
+    from src.server import _parse_doc_arg
+
+    parsed, err = _parse_doc_arg(b'{"k": "v"}')
+    assert parsed == {"k": "v"}
+    assert err is None
+
+
+def test_parse_doc_arg_dict_passthrough():
+    # An already-dict value is returned as-is (same object), no error.
+    from src.server import _parse_doc_arg
+
+    doc = {"type": "doc"}
+    parsed, err = _parse_doc_arg(doc)
+    assert parsed is doc
+    assert err is None
+
+
+def test_parse_doc_arg_list_passthrough():
+    # A list value passes through untouched, no error.
+    from src.server import _parse_doc_arg
+
+    doc = [1, 2, 3]
+    parsed, err = _parse_doc_arg(doc)
+    assert parsed is doc
+    assert err is None
+
+
+def test_parse_doc_arg_broken_json():
+    # Broken JSON yields no value and a Russian parse-error message.
+    from src.server import _parse_doc_arg
+
+    parsed, err = _parse_doc_arg("{not json")
+    assert parsed is None
+    assert err is not None
+    assert err.startswith("Не удалось разобрать doc")
+
+
+def test_warnings_suffix_none_and_empty():
+    # None and an empty list both render to an empty suffix.
+    from src.server import _warnings_suffix
+
+    assert _warnings_suffix(None) == ""
+    assert _warnings_suffix([]) == ""
+
+
+def test_warnings_suffix_bullets():
+    # A non-empty list renders a 'Предупреждения:' bullet block.
+    from src.server import _warnings_suffix
+
+    assert _warnings_suffix(["a", "b"]) == "\nПредупреждения:\n- a\n- b"
+
+
+def test_filter_hubs_query_keeps_only_matching():
+    # A non-empty query keeps matching hubs and drops the rest.
+    from src.server import _filter_hubs
+
+    catalog = {
+        "collective": [{"id": 359, "alias": "programming", "title": "Программирование"}],
+        "offtopic": [{"id": 21976, "alias": "diy", "title": "DIY или Сделай сам"}],
+        "corporative": [],
+        "byPost": [],
+    }
+    out = _filter_hubs(catalog, "diy", 40)
+    assert "21976" in out
+    assert "diy" in out
+    assert "programming" not in out
+
+
+def test_filter_hubs_empty_query_lists_all():
+    # An empty query lists the whole catalog.
+    from src.server import _filter_hubs
+
+    catalog = {
+        "collective": [{"id": 359, "alias": "programming", "title": "Программирование"}],
+        "offtopic": [{"id": 21976, "alias": "diy", "title": "DIY"}],
+        "corporative": [],
+        "byPost": [],
+    }
+    out = _filter_hubs(catalog, "", 40)
+    assert "programming" in out
+    assert "diy" in out
+
+
+def test_filter_hubs_caps_at_limit_with_summary():
+    # When matches exceed limit, output is capped and a summary line is appended.
+    from src.server import _filter_hubs
+
+    catalog = {
+        "collective": [
+            {"id": i, "alias": f"h{i}", "title": f"Hub {i}"} for i in range(5)
+        ],
+        "offtopic": [],
+        "corporative": [],
+        "byPost": [],
+    }
+    out = _filter_hubs(catalog, "", 2)
+    lines = out.split("\n")
+    # 2 hub lines + 1 trailing summary line.
+    assert len(lines) == 3
+    assert lines[-1] == "… показано 2 из 5"
+
+
+def test_filter_hubs_empty_result_with_query():
+    # No match for a query -> a query-specific not-found message.
+    from src.server import _filter_hubs
+
+    catalog = {"collective": [{"id": 1, "alias": "a", "title": "A"}],
+               "offtopic": [], "corporative": [], "byPost": []}
+    assert _filter_hubs(catalog, "zzz", 40) == "Хабы по запросу 'zzz' не найдены."
+
+
+def test_filter_hubs_empty_result_empty_query():
+    # An empty catalog with an empty query -> the generic not-found message.
+    from src.server import _filter_hubs
+
+    catalog = {"collective": [], "offtopic": [], "corporative": [], "byPost": []}
+    assert _filter_hubs(catalog, "", 40) == "Хабы не найдены."
+
+
+def test_match_hub_aliases_known_and_unknown():
+    # Known aliases map to 'alias → id (title)'; unknown -> 'alias → не найден'.
+    from src.server import _match_hub_aliases
+
+    catalog = {
+        "collective": [{"id": "23108", "alias": "smol", "title": "$mol *"}],
+        "offtopic": [],
+        "corporative": [],
+        "byPost": [{"id": "161", "alias": "habr", "title": "Habr"}],
+    }
+    out = _match_hub_aliases(catalog, ["habr", "ghost"])
+    assert "habr → 161 (Habr)" in out
+    assert "ghost → не найден" in out
+
+
+def test_match_hub_aliases_empty_list():
+    # An empty aliases list -> a clear "nothing passed" message.
+    from src.server import _match_hub_aliases
+
+    catalog = {"collective": [], "offtopic": [], "corporative": [], "byPost": []}
+    assert _match_hub_aliases(catalog, []) == "Не передано ни одного алиаса."
+
+
+def test_match_hub_aliases_title_falls_back_to_titlehtml():
+    # When 'title' is missing, the 'titleHtml' value is used verbatim.
+    from src.server import _match_hub_aliases
+
+    catalog = {
+        "collective": [{"id": "9", "alias": "x", "titleHtml": "X <b>html</b>"}],
+        "offtopic": [], "corporative": [], "byPost": [],
+    }
+    out = _match_hub_aliases(catalog, ["x"])
+    assert out == "x → 9 (X <b>html</b>)"
+
+
+def test_match_hub_aliases_dedups_across_groups():
+    # A duplicate alias across groups keeps the FIRST occurrence (setdefault).
+    from src.server import _match_hub_aliases
+
+    catalog = {
+        "collective": [{"id": "1", "alias": "dup", "title": "First"}],
+        "offtopic": [{"id": "2", "alias": "dup", "title": "Second"}],
+        "corporative": [],
+        "byPost": [],
+    }
+    out = _match_hub_aliases(catalog, ["dup"])
+    assert out == "dup → 1 (First)"
+
+
+def test_format_flows_renders_lines():
+    # Flows render as 'id  alias  title' lines.
+    from src.server import _format_flows
+
+    data = {"flows": [{"id": "2", "alias": "backend", "title": "Бэкенд"}]}
+    assert _format_flows(data) == "2  backend  Бэкенд"
+
+
+def test_format_flows_skips_non_dict_entries():
+    # Non-dict entries in the flows list are skipped.
+    from src.server import _format_flows
+
+    data = {"flows": [{"id": "2", "alias": "backend", "title": "Бэкенд"}, "junk", 5]}
+    assert _format_flows(data) == "2  backend  Бэкенд"
+
+
+def test_format_flows_empty():
+    # Empty/missing flows -> the not-found message.
+    from src.server import _format_flows
+
+    assert _format_flows({"flows": []}) == "Потоки не найдены."
+    assert _format_flows({}) == "Потоки не найдены."
+
+
+def test_draft_id_non_dict_input():
+    # A non-dict response can never yield an id -> "?".
+    from src.server import _draft_id
+
+    assert _draft_id(None) == "?"
+    assert _draft_id("x") == "?"
+    assert _draft_id([]) == "?"
+
+
+# -- Phase 1: additional READY end-to-end tool calls -------------------------
+
+
+@respx.mock
+async def test_search_articles_tool_happy(seeded_social_server, feed_payload):
+    # search_articles hits articles/ and renders the formatted list under a header
+    # carrying the query.
+    respx.get(f"{BASE_URL}articles/").mock(
+        return_value=httpx.Response(200, json=feed_payload)
+    )
+    out = _text(
+        await seeded_social_server.call_tool("search_articles", {"query": "rust"})
+    )
+    assert "rust" in out
+    assert "Вторая статья" in out
+    assert "id=200" in out
+
+
+@respx.mock
+async def test_search_articles_tool_error(seeded_social_server):
+    # A Habr error dict (httpCode>=400) surfaces as the error message string.
+    respx.get(f"{BASE_URL}articles/").mock(
+        return_value=httpx.Response(200, json={"httpCode": 500, "message": "Boom"})
+    )
+    out = _text(
+        await seeded_social_server.call_tool("search_articles", {"query": "rust"})
+    )
+    assert out == "Boom"
+
+
+@respx.mock
+async def test_post_comment_tool_top_level_sends_parent_zero(seeded_social_server):
+    # Omitting parent_id must send parent id 0 (top-level comment).
+    route = respx.post(f"{BASE_URL}articles/100/comments/add/").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    out = _text(
+        await seeded_social_server.call_tool(
+            "post_comment", {"article_id": 100, "text": "hi"}
+        )
+    )
+    assert "Комментарий отправлен" in out
+    import json as json_module
+
+    body = json_module.loads(route.calls.last.request.content)
+    assert body["parent_id"] == 0
+
+
+@respx.mock
+async def test_post_comment_tool_reply_sends_parent_id(seeded_social_server):
+    # A provided parent_id is forwarded as the reply target.
+    route = respx.post(f"{BASE_URL}articles/100/comments/add/").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    out = _text(
+        await seeded_social_server.call_tool(
+            "post_comment", {"article_id": 100, "text": "re", "parent_id": 77}
+        )
+    )
+    assert "Комментарий отправлен" in out
+    import json as json_module
+
+    body = json_module.loads(route.calls.last.request.content)
+    assert body["parent_id"] == 77
+
+
+@respx.mock
+async def test_post_comment_tool_error(seeded_social_server):
+    # A Habr error dict surfaces as the error message string.
+    respx.post(f"{BASE_URL}articles/100/comments/add/").mock(
+        return_value=httpx.Response(200, json={"httpCode": 403, "message": "Nope"})
+    )
+    out = _text(
+        await seeded_social_server.call_tool(
+            "post_comment", {"article_id": 100, "text": "hi"}
+        )
+    )
+    assert out == "Nope"
+
+
+@respx.mock
+async def test_get_comments_tool_truncates(seeded_social_server, comments_payload):
+    # limit=1 renders only the root; the beyond-limit child author is absent and
+    # the truncation note appears.
+    respx.get(f"{BASE_URL}articles/100/comments/").mock(
+        return_value=httpx.Response(200, json=comments_payload)
+    )
+    out = _text(
+        await seeded_social_server.call_tool(
+            "get_comments", {"article_id": 100, "limit": 1}
+        )
+    )
+    assert "carol" in out
+    assert "dave" not in out
+    assert "показаны первые 1 из 2" in out
+
+
+@respx.mock
+async def test_get_comments_tool_error(seeded_social_server):
+    # A Habr error dict surfaces as the error message string.
+    respx.get(f"{BASE_URL}articles/100/comments/").mock(
+        return_value=httpx.Response(200, json={"httpCode": 404, "message": "Gone"})
+    )
+    out = _text(
+        await seeded_social_server.call_tool("get_comments", {"article_id": 100})
+    )
+    assert out == "Gone"
+
+
+@respx.mock
+async def test_delete_draft_tool_success(seeded_server):
+    # A successful DELETE confirms the deletion in the output.
+    respx.delete(f"{BASE_URL}articles/drafts/42/posts").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    out = _text(await seeded_server.call_tool("delete_draft", {"post_id": 42}))
+    assert "Черновик 42 удалён" in out
+
+
+@respx.mock
+async def test_delete_draft_tool_error(seeded_server):
+    # A Habr error dict surfaces as the error message string.
+    respx.delete(f"{BASE_URL}articles/drafts/42/posts").mock(
+        return_value=httpx.Response(200, json={"httpCode": 500, "message": "Fail"})
+    )
+    out = _text(await seeded_server.call_tool("delete_draft", {"post_id": 42}))
+    assert out == "Fail"
+
+
+@respx.mock
+async def test_get_draft_tool_error(seeded_server):
+    # A Habr error on post-data surfaces as the error message string.
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json={"httpCode": 404, "message": "No draft"})
+    )
+    out = _text(await seeded_server.call_tool("get_draft", {"post_id": 42}))
+    assert out == "No draft"
+
+
+@respx.mock
+async def test_list_flows_tool_success(seeded_server):
+    # list_flows renders the flows reference; the alias appears in the output.
+    respx.get(f"{BASE_URL}refs/flows/wysiwyg").mock(
+        return_value=httpx.Response(
+            200, json={"flows": [{"id": "2", "alias": "backend", "title": "Бэкенд"}]}
+        )
+    )
+    out = _text(await seeded_server.call_tool("list_flows", {}))
+    assert "backend" in out
+
+
+@respx.mock
+async def test_list_flows_tool_error(seeded_server):
+    # A Habr error dict surfaces as the error message string.
+    respx.get(f"{BASE_URL}refs/flows/wysiwyg").mock(
+        return_value=httpx.Response(200, json={"httpCode": 500, "message": "Down"})
+    )
+    out = _text(await seeded_server.call_tool("list_flows", {}))
+    assert out == "Down"
+
+
+_GDOC_BODY = {
+    "body": {
+        "content": [
+            {"paragraph": {"elements": [
+                {"textRun": {"content": "Тело\n", "textStyle": {}}}]}}
+        ]
+    }
+}
+
+
+@pytest.mark.parametrize("tool", ["create_draft_from_docmost", "create_draft_from_gdoc",
+                                  "update_draft_from_docmost", "update_draft_from_gdoc"])
+@respx.mock
+async def test_save_habr_api_error_returns_message(tool, seeded_server, docmost_doc,
+                                                   post_data_payload):
+    # When the save route returns a Habr error dict, each draft tool returns the
+    # error message string. Update tools also read post-data first (mocked valid).
+    import json as json_module
+
+    is_update = tool.startswith("update_")
+    is_gdoc = tool.endswith("_from_gdoc")
+    doc = _GDOC_BODY if is_gdoc else docmost_doc
+    if is_update:
+        respx.get(f"{BASE_URL}publication/post-data/42").mock(
+            return_value=httpx.Response(200, json=post_data_payload)
+        )
+        respx.post(f"{BASE_URL}publication/save/42").mock(
+            return_value=httpx.Response(200, json={"httpCode": 500, "message": "SaveErr"})
+        )
+        args = {"post_id": 42, "doc": json_module.dumps(doc),
+                "announce": "А" * 120}
+    else:
+        respx.post(f"{BASE_URL}publication/save").mock(
+            return_value=httpx.Response(200, json={"httpCode": 500, "message": "SaveErr"})
+        )
+        args = {"title": "T", "doc": json_module.dumps(doc), "hubs": ["161"],
+                "tags": ["t1"], "flow": "2", "announce": "А" * 120}
+    out = _text(await seeded_server.call_tool(tool, args))
+    assert out == "SaveErr"
