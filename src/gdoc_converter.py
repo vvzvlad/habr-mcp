@@ -861,6 +861,14 @@ def _build_code_block(lines: list[str]) -> dict:
 # --- Tables ------------------------------------------------------------------
 
 
+def _coerce_span(value: Any) -> int:
+    """Coerce a column/row span value to a positive int (fallback to 1)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _build_table(
     table: dict,
     scope: _Scope,
@@ -883,12 +891,6 @@ def _build_table(
             if not isinstance(cell, dict):
                 continue
             cell_style = cell.get("tableCellStyle") or {}
-
-            def _coerce_span(value: Any) -> int:
-                try:
-                    return int(value)
-                except (TypeError, ValueError):
-                    return 1
 
             cell_blocks = _convert_structural_content(
                 cell.get("content"), scope, warnings, seen

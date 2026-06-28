@@ -208,6 +208,63 @@ def _draft_id(response: Any) -> str:
     return "?"
 
 
+def _match_hub_aliases(catalog: dict[str, Any], aliases: list[str]) -> str:
+    """Map hub aliases to 'alias → id (title)' lines using a suggest-hubs catalog."""
+    alias_map: dict[str, dict[str, Any]] = {}
+    for group in ("collective", "offtopic", "corporative", "byPost"):
+        for hub in catalog.get(group) or []:
+            if isinstance(hub, dict) and hub.get("alias"):
+                alias_map.setdefault(str(hub["alias"]), hub)
+    lines: list[str] = []
+    for alias in aliases:
+        hub = alias_map.get(alias)
+        if hub:
+            title = hub.get("title") or hub.get("titleHtml") or ""
+            lines.append(f"{alias} → {hub.get('id')} ({title})")
+        else:
+            lines.append(f"{alias} → не найден")
+    return "\n".join(lines) if lines else "Не передано ни одного алиаса."
+
+
+def _filter_hubs(catalog: dict[str, Any], query: str, limit: int) -> str:
+    """Filter the suggest-hubs catalog by query into 'id  alias  title' lines."""
+    hubs_by_id: dict[str, dict[str, Any]] = {}
+    for group in ("collective", "offtopic", "corporative", "byPost"):
+        for hub in catalog.get(group) or []:
+            if isinstance(hub, dict) and hub.get("id") is not None:
+                hubs_by_id.setdefault(str(hub["id"]), hub)
+    q = query.strip().lower()
+    lines: list[str] = []
+    total = 0
+    for hid, hub in hubs_by_id.items():
+        alias = hub.get("alias") or ""
+        title = hub.get("title") or html_to_text(hub.get("titleHtml") or "")
+        if q and q not in alias.lower() and q not in title.lower():
+            continue
+        total += 1
+        if len(lines) < limit:
+            lines.append(f"{hid}  {alias}  {title}")
+    if not lines:
+        if query:
+            return f"Хабы по запросу '{query}' не найдены."
+        return "Хабы не найдены."
+    shown = len(lines)
+    if total > shown:
+        lines.append(f"… показано {shown} из {total}")
+    return "\n".join(lines)
+
+
+def _format_flows(data: dict[str, Any]) -> str:
+    """Render the flows reference as 'id  alias  title' lines."""
+    flows = data.get("flows") or []
+    lines: list[str] = []
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        lines.append(f"{flow.get('id')}  {flow.get('alias')}  {flow.get('title', '')}")
+    return "\n".join(lines) if lines else "Потоки не найдены."
+
+
 def build_server(settings: Settings | None = None) -> FastMCP:
     """Build the HTTP-only, multi-tenant FastMCP server.
 
@@ -735,20 +792,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             catalog = await client.suggest_hubs(post_id)
         except HabrApiError as exc:
             return str(exc)
-        alias_map: dict[str, dict[str, Any]] = {}
-        for group in ("collective", "offtopic", "corporative", "byPost"):
-            for hub in catalog.get(group) or []:
-                if isinstance(hub, dict) and hub.get("alias"):
-                    alias_map.setdefault(str(hub["alias"]), hub)
-        lines: list[str] = []
-        for alias in aliases:
-            hub = alias_map.get(alias)
-            if hub:
-                title = hub.get("title") or hub.get("titleHtml") or ""
-                lines.append(f"{alias} → {hub.get('id')} ({title})")
-            else:
-                lines.append(f"{alias} → не найден")
-        return "\n".join(lines) if lines else "Не передано ни одного алиаса."
+        return _match_hub_aliases(catalog, aliases)
 
     @mcp.tool(
         name="search_hubs",
@@ -767,33 +811,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             catalog = await client.suggest_hubs()
         except HabrApiError as exc:
             return str(exc)
-        # Flatten all hub groups and dedup by numeric id.
-        hubs_by_id: dict[str, dict[str, Any]] = {}
-        for group in ("collective", "offtopic", "corporative", "byPost"):
-            for hub in catalog.get(group) or []:
-                if isinstance(hub, dict) and hub.get("id") is not None:
-                    hubs_by_id.setdefault(str(hub["id"]), hub)
-        q = query.strip().lower()
-        lines: list[str] = []
-        total = 0
-        for hid, hub in hubs_by_id.items():
-            alias = hub.get("alias") or ""
-            # Prefer the raw plain title; only strip HTML when it is absent,
-            # otherwise html_to_text mangles a present plain title.
-            title = hub.get("title") or html_to_text(hub.get("titleHtml") or "")
-            if q and q not in alias.lower() and q not in title.lower():
-                continue
-            total += 1
-            if len(lines) < limit:
-                lines.append(f"{hid}  {alias}  {title}")
-        if not lines:
-            if query:
-                return f"Хабы по запросу '{query}' не найдены."
-            return "Хабы не найдены."
-        shown = len(lines)
-        if total > shown:
-            lines.append(f"… показано {shown} из {total}")
-        return "\n".join(lines)
+        return _filter_hubs(catalog, query, limit)
 
     @mcp.tool(
         name="list_flows",
@@ -813,15 +831,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             data = await client.list_flows(publication_id)
         except HabrApiError as exc:
             return str(exc)
-        flows = data.get("flows") or []
-        lines: list[str] = []
-        for flow in flows:
-            if not isinstance(flow, dict):
-                continue
-            lines.append(
-                f"{flow.get('id')}  {flow.get('alias')}  {flow.get('title', '')}"
-            )
-        return "\n".join(lines) if lines else "Потоки не найдены."
+        return _format_flows(data)
 
     # -- auth tools ---------------------------------------------------------
 

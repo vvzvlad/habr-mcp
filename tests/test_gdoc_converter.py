@@ -11,9 +11,19 @@ from __future__ import annotations
 import json
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from src.converter import docmost_to_habr_doc
-from src.gdoc_converter import gdoc_to_docmost_doc
+from src.gdoc_converter import (
+    _INLINE_OBJECT_SENTINEL,
+    _SOFT_BREAK,
+    _Scope,
+    _coerce_px,
+    _coerce_span,
+    _list_is_ordered,
+    gdoc_to_docmost_doc,
+)
 
 
 # --- builders ----------------------------------------------------------------
@@ -826,3 +836,397 @@ def test_pipeline_composes_with_docmost_to_habr():
     assert {"type": "bold"} in bold_run["marks"]
     # The list uses the canonical Habr "listitem" naming.
     assert "list_item" not in json.dumps(habr)
+
+
+# --- Phase 3: robustness / edge branches (example-based) ---------------------
+
+
+def test_nested_list_type_switch_attaches_to_parent_item():
+    # A deeper (nested) level switches glyph type mid-run: the new sibling list
+    # must attach to the PARENT listItem, not the document root. Structure:
+    #   outer (ordered, level 0)
+    #     -> nested-A ordered (level 1) -> item "a"
+    #     -> nested-B bullet  (level 1) -> item "b"  (sibling list in same parent)
+    lists = {
+        "O": {"listProperties": {"nestingLevels": [
+            {"glyphType": "DECIMAL"}, {"glyphType": "DECIMAL"}]}},
+        "U": {"listProperties": {"nestingLevels": [
+            {"glyphType": "DECIMAL"}, {"glyphType": "NONE"}]}},
+    }
+    blocks = _blocks(
+        _para(_run("outer\n"), bullet={"listId": "O", "nestingLevel": 0}),
+        _para(_run("a\n"), bullet={"listId": "O", "nestingLevel": 1}),
+        _para(_run("b\n"), bullet={"listId": "U", "nestingLevel": 1}),
+        lists=lists,
+    )
+    # One top-level list only: the switch did NOT leak to the document root.
+    assert len(blocks) == 1
+    top = blocks[0]
+    assert top["type"] == "orderedList"
+    parent_item = top["content"][0]
+    assert parent_item["content"][0]["content"][0]["text"] == "outer"
+    # The parent item holds BOTH nested sibling lists (ordered then bullet).
+    nested_lists = parent_item["content"][1:]
+    assert [n["type"] for n in nested_lists] == ["orderedList", "bulletList"]
+    assert nested_lists[0]["content"][0]["content"][0]["content"][0]["text"] == "a"
+    assert nested_lists[1]["content"][0]["content"][0]["content"][0]["text"] == "b"
+
+
+def test_list_item_without_paragraph_gets_empty_paragraph_injected():
+    # A list item whose only content is an inline image (hoisted into its own
+    # block) has no paragraph/heading to seed the listItem -> an empty paragraph
+    # is injected so the listItem is well-formed (image kept as an extra block).
+    blocks = _blocks(
+        _para({"inlineObjectElement": {"inlineObjectId": "IO"}},
+              bullet={"listId": "L"}),
+        lists=_ordered_list("DECIMAL"),
+        inlineObjects=_inline_objects(),
+    )
+    assert len(blocks) == 1
+    item = blocks[0]["content"][0]
+    assert item["type"] == "listItem"
+    # First child is the injected blank paragraph; the image follows it.
+    assert item["content"][0] == {"type": "paragraph"}
+    assert item["content"][1]["type"] == "image"
+
+
+def test_image_and_rule_inside_heading_are_hoisted_out():
+    # An inline image and a horizontalRule placed INSIDE a heading paragraph are
+    # hoisted out as siblings; the heading keeps only its text.
+    blocks = _blocks(
+        _para(
+            _run("Title "),
+            {"inlineObjectElement": {"inlineObjectId": "IO"}},
+            {"horizontalRule": {}},
+            _run(" more\n"),
+            style={"namedStyleType": "HEADING_2"},
+        ),
+        inlineObjects=_inline_objects(),
+    )
+    assert [b["type"] for b in blocks] == [
+        "heading", "image", "horizontalRule", "heading",
+    ]
+    assert blocks[0]["attrs"]["level"] == 2
+    assert blocks[0]["content"][0]["text"] == "Title "
+    assert blocks[3]["content"][0]["text"] == " more"
+
+
+def test_coerce_px_non_numeric_and_missing_return_none():
+    assert _coerce_px(None) is None
+    assert _coerce_px("not a number") is None
+    assert _coerce_px({}) is None
+    # A valid magnitude still converts (72 PT -> 96 px) to guard against regressions.
+    assert _coerce_px(72) == 96
+
+
+def test_coerce_span_fallback_and_valid():
+    # Non-numeric / missing -> 1; a valid value -> that int.
+    assert _coerce_span(None) == 1
+    assert _coerce_span("oops") == 1
+    assert _coerce_span({}) == 1
+    assert _coerce_span(3) == 3
+    assert _coerce_span("4") == 4
+
+
+def test_inline_image_with_unknown_id_dropped_once_warning():
+    warnings: list[str] = []
+    out = gdoc_to_docmost_doc(
+        _gdoc(
+            _para({"inlineObjectElement": {"inlineObjectId": "MISSING"}}),
+            _para({"inlineObjectElement": {"inlineObjectId": "MISSING2"}}),
+            inlineObjects={},  # neither id resolves
+        ),
+        warnings,
+    )
+    assert out["content"] == []
+    # A once-style warning is recorded (and only once).
+    assert warnings.count("inline image dropped (id not found)") == 1
+
+
+def test_positioned_image_with_unknown_id_dropped_once_warning():
+    warnings: list[str] = []
+    out = gdoc_to_docmost_doc(
+        _gdoc(
+            _para(_run("a\n"), positioned=["MISSING"]),
+            _para(_run("b\n"), positioned=["MISSING2"]),
+            positionedObjects={},  # neither id resolves
+        ),
+        warnings,
+    )
+    # The paragraphs survive; only the missing positioned images are dropped.
+    assert [b["type"] for b in out["content"]] == ["paragraph", "paragraph"]
+    assert warnings.count("positioned image dropped (id not found)") == 1
+
+
+def test_embedded_object_without_image_properties_dropped_with_warning():
+    warnings: list[str] = []
+    out = gdoc_to_docmost_doc(
+        _gdoc(
+            _para({"inlineObjectElement": {"inlineObjectId": "IO"}}),
+            inlineObjects={
+                "IO": {"inlineObjectProperties": {
+                    # An embeddedObject with neither a drawing nor imageProperties.
+                    "embeddedObject": {"title": "T"}}}
+            },
+        ),
+        warnings,
+    )
+    assert out["content"] == []
+    assert any("without image" in w for w in warnings)
+
+
+@pytest.mark.parametrize(
+    "lists_map",
+    [
+        {},                                              # list id absent entirely
+        {"L": "not-a-dict"},                             # list entry not a dict
+        {"L": {}},                                       # no listProperties
+        {"L": {"listProperties": "broken"}},             # listProperties not a dict
+        {"L": {"listProperties": {}}},                   # no nestingLevels
+        {"L": {"listProperties": {"nestingLevels": "x"}}},  # nestingLevels not list
+        {"L": {"listProperties": {"nestingLevels": []}}},   # index out of range
+        {"L": {"listProperties": {"nestingLevels": ["x"]}}},  # level not a dict
+        {"L": {"listProperties": {"nestingLevels": [{"glyphSymbol": "*"}]}}},  # symbol
+    ],
+)
+def test_list_is_ordered_broken_maps_default_unordered(lists_map):
+    scope = _Scope(lists_map, {}, {})
+    assert _list_is_ordered(scope, "L", 0) is False
+
+
+def test_list_is_ordered_valid_ordered_glyph_returns_true():
+    scope = _Scope(
+        {"L": {"listProperties": {"nestingLevels": [{"glyphType": "DECIMAL"}]}}},
+        {}, {},
+    )
+    assert _list_is_ordered(scope, "L", 0) is True
+
+
+def test_unknown_structural_elements_are_skipped_without_crashing():
+    # A grab-bag of junk: a non-dict element, a dict with an unrecognized key, a
+    # table with a non-dict row/cell, a paragraph with non-dict elements. None of
+    # these may crash, and the valid sibling paragraph must survive.
+    out = gdoc_to_docmost_doc(
+        _gdoc(
+            "i am not a dict",                       # non-dict structural element
+            {"mysteryElement": {"foo": "bar"}},      # unrecognized structural key
+            {"paragraph": {"elements": ["junk", 42, None]}},  # non-dict elements
+            {"table": {"tableRows": ["not-a-row", {"tableCells": ["not-a-cell"]}]}},
+            _para(_run("survivor\n")),               # valid sibling
+        )
+    )
+    texts = [
+        n["text"]
+        for b in out["content"]
+        if b.get("type") == "paragraph"
+        for n in b.get("content", [])
+        if n.get("type") == "text"
+    ]
+    assert "survivor" in texts
+
+
+# --- Phase 4: property tests (hypothesis) ------------------------------------
+
+# A pool of textRun content fragments: plain text, soft breaks, interior
+# newlines and the inline-object sentinel, so transformations are exercised.
+_text_fragments = st.text(
+    alphabet=st.sampled_from(
+        list("abc 123") + ["\n", _SOFT_BREAK, _INLINE_OBJECT_SENTINEL]
+    ),
+    max_size=8,
+)
+
+
+@st.composite
+def _gd_text_run(draw) -> dict:
+    """A textRun ParagraphElement with optional simple style."""
+    style: dict = {}
+    if draw(st.booleans()):
+        style["bold"] = True
+    if draw(st.booleans()):
+        style["italic"] = True
+    return {"textRun": {"content": draw(_text_fragments), "textStyle": style}}
+
+
+_inline_object_element = st.fixed_dictionaries(
+    {"inlineObjectElement": st.fixed_dictionaries(
+        {"inlineObjectId": st.sampled_from(["IO", "MISSING"])})}
+)
+
+_horizontal_rule = st.just({"horizontalRule": {}})
+
+# POISON: non-dict elements and junk shapes to stress totality.
+_poison_element = st.one_of(
+    st.none(), st.integers(), st.text(max_size=4),
+    st.just({"unknownElement": {}}),
+)
+
+_paragraph_element = st.one_of(
+    _gd_text_run(), _inline_object_element, _horizontal_rule, _poison_element
+)
+
+_named_style = st.sampled_from(
+    [None, "NORMAL_TEXT", "TITLE", "HEADING_1", "HEADING_3", "SUBTITLE", "JUNK"]
+)
+
+
+@st.composite
+def _gd_paragraph(draw) -> dict:
+    """A paragraph StructuralElement; sometimes a list item or styled heading."""
+    elements = draw(st.lists(_paragraph_element, max_size=4))
+    paragraph: dict = {"elements": elements}
+    named = draw(_named_style)
+    if named is not None:
+        paragraph["paragraphStyle"] = {"namedStyleType": named}
+    if draw(st.booleans()):
+        paragraph["bullet"] = {"listId": "L", "nestingLevel": draw(st.integers(0, 2))}
+    return {"paragraph": paragraph}
+
+
+@st.composite
+def _gd_table(draw) -> dict:
+    """A small table StructuralElement (cells recurse with paragraphs)."""
+    rows = draw(st.lists(
+        st.lists(
+            st.fixed_dictionaries({"content": st.lists(_gd_paragraph(), max_size=2)}),
+            max_size=2,
+        ),
+        max_size=2,
+    ))
+    return {"table": {"tableRows": [{"tableCells": cells} for cells in rows]}}
+
+
+_structural_element = st.one_of(
+    _gd_paragraph(), _gd_table(), _poison_element, st.just({"sectionBreak": {}})
+)
+
+
+@st.composite
+def _gd_document(draw) -> dict:
+    """A Google-Docs "Document"-shaped JSON with a body.content list."""
+    content = draw(st.lists(_structural_element, max_size=6))
+    doc: dict = {"body": {"content": content}}
+    # Provide a partial lists map (id "L") so list items sometimes resolve.
+    doc["lists"] = {
+        "L": {"listProperties": {"nestingLevels": [
+            {"glyphType": "DECIMAL"}, {"glyphType": "NONE"}, {"glyphType": "DECIMAL"}]}}
+    }
+    doc["inlineObjects"] = {
+        "IO": {"inlineObjectProperties": {"embeddedObject": {
+            "imageProperties": {"contentUri": "https://x/img"}}}}
+    }
+    return doc
+
+
+def _walk_nodes(node: dict):
+    """Yield every node dict in a TipTap tree (depth-first)."""
+    yield node
+    for child in node.get("content") or []:
+        if isinstance(child, dict):
+            yield from _walk_nodes(child)
+
+
+_CONTAINER_TYPES = {
+    "doc", "paragraph", "heading", "codeBlock",
+    "bulletList", "orderedList", "listItem",
+    "table", "tableRow", "tableCell", "tableHeader",
+}
+
+
+@settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+@given(_gd_document())
+def test_property_totality_never_raises(gdoc):
+    # Totality: any generated document converts to a well-formed doc envelope.
+    out = gdoc_to_docmost_doc(gdoc, [])
+    assert isinstance(out, dict)
+    assert out["type"] == "doc"
+    assert isinstance(out["content"], list)
+
+
+@settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+@given(_gd_document())
+def test_property_output_schema_is_well_formed(gdoc):
+    # Every node is a dict with a string `type`; containers carry a list
+    # `content`; text nodes carry a string `text`.
+    out = gdoc_to_docmost_doc(gdoc, [])
+    for node in _walk_nodes(out):
+        assert isinstance(node, dict)
+        assert isinstance(node.get("type"), str)
+        ntype = node["type"]
+        if "content" in node:
+            assert isinstance(node["content"], list)
+        if ntype in _CONTAINER_TYPES and ntype != "codeBlock":
+            # Containers (except the optionally-empty codeBlock) always have a list.
+            assert isinstance(node.get("content", []), list)
+        if ntype == "text":
+            assert isinstance(node.get("text"), str)
+
+
+def _expected_visible_text(gdoc: dict) -> str:
+    """Concatenate textRun visible text per the module's documented rules.
+
+    Mirrors the converter: strip the inline-object sentinel, turn soft breaks
+    into newlines, and strip the single trailing paragraph newline on the LAST
+    textRun of each paragraph. Headings/paragraphs/list-items all contribute
+    text; non-textRun elements contribute nothing visible here.
+    """
+    out_parts: list[str] = []
+
+    def visit(content):
+        for el in content or []:
+            if not isinstance(el, dict):
+                continue
+            para = el.get("paragraph")
+            if isinstance(para, dict):
+                # A TITLE paragraph is dropped from the body entirely.
+                style = para.get("paragraphStyle") or {}
+                if style.get("namedStyleType") == "TITLE":
+                    continue
+                elements = para.get("elements") or []
+                last_run = -1
+                for i, e in enumerate(elements):
+                    if isinstance(e, dict) and "textRun" in e:
+                        last_run = i
+                for i, e in enumerate(elements):
+                    if not isinstance(e, dict) or "textRun" not in e:
+                        continue
+                    text = (e.get("textRun") or {}).get("content") or ""
+                    if i == last_run and text.endswith("\n"):
+                        text = text[:-1]
+                    text = text.replace(_SOFT_BREAK, "\n").replace(
+                        _INLINE_OBJECT_SENTINEL, "")
+                    out_parts.append(text)
+            table = el.get("table")
+            if isinstance(table, dict):
+                for row in table.get("tableRows") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    for cell in row.get("tableCells") or []:
+                        if isinstance(cell, dict):
+                            visit(cell.get("content"))
+
+    visit(gdoc["body"]["content"])
+    # Newlines in the source become hardBreaks (no visible char); the rest is the
+    # visible character stream.
+    return "".join(out_parts).replace("\n", "")
+
+
+def _output_visible_text(node: dict) -> str:
+    """Concatenate all text-node strings in the output tree."""
+    parts: list[str] = []
+    for n in _walk_nodes(node):
+        if n.get("type") == "text":
+            parts.append(n.get("text") or "")
+    return "".join(parts)
+
+
+@settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+@given(_gd_document())
+def test_property_visible_text_round_trips(gdoc):
+    # The visible text (minus sentinels / soft-break+newline chars) of the input
+    # is preserved in the output. Code-line paragraphs and list/heading paths all
+    # keep their textRun characters; only the documented transformations apply.
+    out = gdoc_to_docmost_doc(gdoc, [])
+    expected = _expected_visible_text(gdoc)
+    actual = _output_visible_text(out)
+    assert actual == expected
