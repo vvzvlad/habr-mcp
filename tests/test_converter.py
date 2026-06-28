@@ -1219,6 +1219,20 @@ def test_collect_image_srcs_dedup_in_order():
     assert collect_image_srcs(src) == ["a", "b"]
 
 
+def test_collect_image_srcs_resource_link_and_string_same_uri_dedupe():
+    # A resource_link node and a plain-string node pointing at the SAME uri
+    # dedupe to one entry (keyed by uri), preserving document order: the first
+    # occurrence (the resource_link) is the one kept.
+    uri = "https://blobs.example.com/img/p.png"
+    link = {"type": "resource_link", "uri": uri, "mimeType": "image/png"}
+    src = _doc(
+        {"type": "image", "attrs": {"src": link}},
+        {"type": "image", "attrs": {"src": "other.png"}},
+        {"type": "image", "attrs": {"src": uri}},  # same uri as the link, dedup
+    )
+    assert collect_image_srcs(src) == [link, "other.png"]
+
+
 # --- _as_doc normalization ---------------------------------------------------
 
 

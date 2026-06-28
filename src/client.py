@@ -91,6 +91,11 @@ _MIN_PREVIEW_CHARS = 100
 # front so the caller gets a clear error instead of a silently truncated teaser.
 _MAX_PREVIEW_CHARS = 3000
 
+# Max number of images fetched+uploaded concurrently in ``_reupload_images``.
+# Bounds peak memory (at most this many image bodies in RAM at once) and the
+# number of open sockets/FDs, while still pipelining fetch with upload.
+_IMAGE_FETCH_CONCURRENCY = 6
+
 
 class HabrApiError(Exception):
     """Raised for any Habr API failure (HTTP error dict, bad body, transport)."""
@@ -896,7 +901,9 @@ class HabrClient:
         match = _HABRASTORAGE_RE.search(response.text or "")
         return match.group(0) if match else None
 
-    async def fetch_resource(self, uri: str) -> tuple[bytes, str | None]:
+    async def fetch_resource(
+        self, uri: str, *, client: httpx.AsyncClient | None = None
+    ) -> tuple[bytes, str | None]:
         """Resolve a ``data:`` URI or ``http(s)`` URL to ``(bytes, content_type)``.
 
         ``data:`` URIs are decoded locally (no network); the content type is the
@@ -904,27 +911,43 @@ class HabrClient:
         URLs are fetched with a plain GET — NO Authorization header is ever sent;
         the content type is the response ``Content-Type`` (normalized to the part
         before ``;``, stripped and lowercased) or None when absent. The habr
-        proxy/timeout/UA are reused (mirrors ``fetch_csrf_token``). When the
-        ``ETag`` response header is a bare sha256 hex digest the body is verified
-        against it (this guards the gitmost sandbox blobs, which send
+        proxy/timeout/UA are reused (mirrors ``fetch_csrf_token``). Redirects are
+        followed (``follow_redirects=True``) so 3xx CDN/Google ``contentUri``
+        hops resolve — this leaks nothing since no credentials are ever sent.
+        When the ``ETag`` response header is a bare sha256 hex digest the body is
+        verified against it (this guards the gitmost sandbox blobs, which send
         ``ETag: "<sha256hex>"``); any other / absent ETag is left unverified so
         external images with opaque CDN validators keep working. Raises
         ``HabrApiError`` (Russian message) on a malformed data URI, a transport
         error, or a sha256 mismatch.
+
+        Pass ``client`` to reuse a shared ``httpx.AsyncClient`` (e.g. the bounded
+        pool in ``_reupload_images``); it is then NOT closed here. When omitted a
+        temporary client is created and closed before returning.
         """
         if uri.startswith("data:"):
             data, media = _decode_data_uri(uri)
             return data, media
-        try:
-            async with httpx.AsyncClient(
+        owns_client = client is None
+        if owns_client:
+            client = httpx.AsyncClient(
                 timeout=self._settings.request_timeout,
                 proxy=self._settings.proxy or None,
                 headers={"User-Agent": self._settings.user_agent},
-            ) as client:
-                response = await client.get(uri)
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
+                follow_redirects=True,
+            )
+        try:
+            response = await client.get(uri)
+            response.raise_for_status()
+        # A malformed src raises httpx.InvalidURL (not an HTTPError) or, for a bad
+        # IDNA host, idna.IDNAError (a ValueError subclass). Wrap all of these so
+        # one bad image can never abort publishing and the doc path gets a clean
+        # Russian error instead of an unhandled exception.
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             raise HabrApiError(f"Не удалось загрузить ресурс {uri}: {exc}") from exc
+        finally:
+            if owns_client:
+                await client.aclose()
         body = response.content
         etag = (response.headers.get("ETag") or "").strip()
         if etag.startswith("W/"):
@@ -951,8 +974,12 @@ class HabrClient:
         the converter drops images that have no mapped URL). Each ``attrs.src``
         may be a plain http(s) URL string, a ``data:`` URI string, or an MCP
         ``resource_link`` dict; all are resolved through ``fetch_resource`` with
-        NO credentials. Sandbox source links are ephemeral (~1h TTL), so all
-        bytes are fetched up front and concurrently before any upload.
+        NO credentials. Sandbox source links are ephemeral (~1h TTL).
+
+        Each image is fetched AND uploaded in a single pass under a concurrency
+        bound (``_IMAGE_FETCH_CONCURRENCY``) so at most that many image bodies are
+        ever held in memory at once and the open sockets/FDs stay bounded; one
+        shared ``httpx.AsyncClient`` reuses connections across all fetches.
         """
         srcs = collect_image_srcs(docmost_doc)
         mapping: dict[str, str] = {}
@@ -960,27 +987,38 @@ class HabrClient:
         if not srcs:
             return mapping, warnings
 
-        # Phase 1: fetch ALL image bytes concurrently, up front.
-        fetch_uris = [resource_link_uri(src) or src for src in srcs]
-        results = await asyncio.gather(
-            *(self.fetch_resource(uri) for uri in fetch_uris),
-            return_exceptions=True,
-        )
+        sem = asyncio.Semaphore(_IMAGE_FETCH_CONCURRENCY)
 
-        # Phase 2: upload each successfully fetched blob to habrastorage.
-        for src, uri, result in zip(srcs, fetch_uris, results):
-            if isinstance(result, BaseException):
-                warnings.append(f"image fetch failed: {uri} ({result})")
-                continue
-            data, fetched_ct = result
-            content_type = fetched_ct or "application/octet-stream"
-            filename = _upload_filename(uri, fetched_ct)
-
-            new_url = await self.upload_image(data, filename, content_type)
+        async def process(src: Any, shared_client: httpx.AsyncClient) -> None:
+            # Bounded fetch+upload for one image. Handles its own errors and
+            # always returns so ``gather`` never raises and one bad image can
+            # never abort publishing.
+            uri = resource_link_uri(src) or src
+            async with sem:
+                try:
+                    data, fetched_ct = await self.fetch_resource(
+                        uri, client=shared_client
+                    )
+                    new_url = await self.upload_image(
+                        data,
+                        _upload_filename(uri, fetched_ct),
+                        fetched_ct or "application/octet-stream",
+                    )
+                except HabrApiError as exc:
+                    warnings.append(f"image fetch failed: {uri} ({exc})")
+                    return
             if new_url:
                 mapping[image_src_key(src)] = new_url
             else:
                 warnings.append(f"image upload failed: {uri}")
+
+        async with httpx.AsyncClient(
+            timeout=self._settings.request_timeout,
+            proxy=self._settings.proxy or None,
+            headers={"User-Agent": self._settings.user_agent},
+            follow_redirects=True,
+        ) as shared_client:
+            await asyncio.gather(*(process(src, shared_client) for src in srcs))
 
         return mapping, warnings
 

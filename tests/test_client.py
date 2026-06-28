@@ -1083,6 +1083,39 @@ async def test_fetch_resource_network_error_raises(anon_settings):
         await client.aclose()
 
 
+async def test_fetch_resource_malformed_url_raises_habr_error(anon_settings):
+    # A malformed URL makes httpx raise InvalidURL (NOT an HTTPError); it must be
+    # wrapped as HabrApiError so it never escapes as an unhandled exception.
+    client = HabrClient(anon_settings)
+    try:
+        with pytest.raises(HabrApiError):
+            await client.fetch_resource("http://[::1/img")
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_fetch_resource_follows_redirect(anon_settings):
+    # A 302 (e.g. Google contentUri / CDN) is followed to the final 200 and
+    # returns the final body + content type.
+    final_url = "https://cdn.example.com/final/pic.png"
+    respx.get(_RES_URL).mock(
+        return_value=httpx.Response(302, headers={"Location": final_url})
+    )
+    respx.get(final_url).mock(
+        return_value=httpx.Response(
+            200, content=b"final-bytes", headers={"Content-Type": "image/png"}
+        )
+    )
+    client = HabrClient(anon_settings)
+    try:
+        body, content_type = await client.fetch_resource(_RES_URL)
+    finally:
+        await client.aclose()
+    assert body == b"final-bytes"
+    assert content_type == "image/png"
+
+
 # -- image reupload (resolver, no Docmost token) -----------------------------
 
 
@@ -1103,7 +1136,7 @@ async def test_reupload_plain_http_url_no_auth(author_settings):
             200, content=b"img", headers={"content-type": "image/png"}
         )
     )
-    respx.post(f"{BASE_URL}publication/upload").mock(
+    upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, json={"url": "https://habrastorage.org/x"})
     )
     client = HabrClient(author_settings)
@@ -1117,6 +1150,8 @@ async def test_reupload_plain_http_url_no_auth(author_settings):
     assert "authorization" not in {
         k.lower() for k in dl_route.calls.last.request.headers
     }
+    # The upload filename is taken from the URL path (abc.png), not derived.
+    assert b'filename="abc.png"' in upload_route.calls.last.request.content
 
 
 @respx.mock
@@ -1194,6 +1229,33 @@ async def test_reupload_extensionless_url_uses_content_type(author_settings):
 
 
 @respx.mock
+async def test_reupload_extensionless_url_octet_stream_falls_back(author_settings):
+    # Extensionless URL whose Content-Type is application/octet-stream (unknown
+    # image type): filename falls back to image.png and the upload content type
+    # is application/octet-stream.
+    image_url = "https://sandbox.example.com/api/sb/no-type-uuid"
+    respx.get(image_url).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"Content-Type": "application/octet-stream"}
+        )
+    )
+    upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/oc"})
+    )
+    client = HabrClient(author_settings)
+    try:
+        mapping, warnings = await client._reupload_images(_image_doc(image_url))
+    finally:
+        await client.aclose()
+
+    assert mapping == {image_url: "https://habrastorage.org/oc"}
+    assert warnings == []
+    sent = upload_route.calls.last.request
+    assert b"application/octet-stream" in sent.content
+    assert b'filename="image.png"' in sent.content
+
+
+@respx.mock
 async def test_reupload_data_uri_jpeg_uses_jpg_filename(author_settings):
     # data:image/jpeg must upload as image/jpeg with a .jpg filename (not .png).
     import base64
@@ -1229,6 +1291,39 @@ async def test_reupload_fetch_failure_skips_with_warning(author_settings):
 
     assert mapping == {}
     assert warnings and "image fetch failed" in warnings[0]
+
+
+@respx.mock
+async def test_reupload_malformed_src_skips_and_valid_image_survives(author_settings):
+    # A malformed src raises httpx.InvalidURL (not an HTTPError) inside the GET.
+    # It must be skipped with a warning WITHOUT aborting the batch: a second,
+    # valid image in the same doc is still fetched and uploaded.
+    bad_url = "http://[::1/img"
+    good_url = "https://cdn.example.com/img/ok.png"
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "image", "attrs": {"src": bad_url}},
+            {"type": "image", "attrs": {"src": good_url}},
+        ],
+    }
+    respx.get(good_url).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/ok"})
+    )
+    client = HabrClient(author_settings)
+    try:
+        mapping, warnings = await client._reupload_images(doc)
+    finally:
+        await client.aclose()
+
+    # The valid image survived the bad one (no abort); the bad one was skipped.
+    assert mapping == {good_url: "https://habrastorage.org/ok"}
+    assert warnings and any("image fetch failed" in w and bad_url in w for w in warnings)
 
 
 # -- fetch_csrf_token --------------------------------------------------------
