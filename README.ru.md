@@ -7,7 +7,7 @@ LLM читать и писать на Habr (и публиковать черно
 недокументированный JSON-API Habr `https://habr.com/kek/v2/`.
 
 - **Чтение** работает анонимно (поиск, ленты, статья, комментарии).
-- **Запись** (комментарии, голоса, закладки) и инструменты **автора/черновиков**
+- **Запись** (комментарии, голоса) и инструменты **автора/черновиков**
   требуют авторизованной сессии.
 
 Сервер работает по `streamable-http` и обслуживает много пользователей одновременно.
@@ -97,7 +97,7 @@ MCP-клиенты подключаются к `https://<host>/mcp`. watchtower 
 | --- | --- | --- |
 | `post_comment` | `article_id: int`, `text: str`, `parent_id: int \| None` | Комментарий (0/None — верхний уровень) |
 | `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Голос за статью |
-| `vote_comment` | `comment_id: int`, `direction: str` | Голос за комментарий (ЭКСПЕРИМЕНТАЛЬНО) |
+| `vote_comment` | `article_id: int`, `comment_id: int`, `direction: str` (`up`/`down`) | Голос за комментарий |
 
 > `post_comment`, `vote_article` и `vote_comment` — **социальные инструменты**,
 > **по умолчанию выключены**; включаются через `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`.
@@ -106,14 +106,15 @@ MCP-клиенты подключаются к `https://<host>/mcp`. watchtower 
 
 | Инструмент | Параметры | Что делает |
 | --- | --- | --- |
-| `create_draft_from_docmost` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `format = "common"` | Создать черновик из страницы Docmost (`doc` — ProseMirror-JSON из `get_page_json`, инлайн **или** MCP `resource_link` на него) |
-| `create_draft_from_gdoc` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `format = "common"` | Создать черновик из документа Google Docs (`doc` — JSON из `readDocument(format='json')`, инлайн **или** MCP `resource_link` на него) |
+| `create_draft_from_docmost` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `announce`, `format = "common"` | `announce` — обязательный анонс (100–3000 символов); Создать черновик из страницы Docmost (`doc` — ProseMirror-JSON из `get_page_json`, инлайн **или** MCP `resource_link` на него) |
+| `create_draft_from_gdoc` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `announce`, `format = "common"` | `announce` — обязательный анонс (100–3000 символов); Создать черновик из документа Google Docs (`doc` — JSON из `readDocument(format='json')`, инлайн **или** MCP `resource_link` на него) |
 | `get_draft` | `post_id: int` | Прочитать черновик (сводка + сырые ProseMirror-исходники) |
 | `list_drafts` | `page: int = 1` | Список черновиков текущего автора (id, заголовок, поток, хабы, теги) |
-| `update_draft_from_docmost` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Обновить поля черновика (автосейв read-modify-write) |
-| `update_draft_from_gdoc` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Обновить поля черновика из документа Google Docs (`doc` — JSON из `readDocument(format='json')`) |
+| `update_draft_from_docmost` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `announce`, `format` | Обновить поля черновика (автосейв read-modify-write) (`announce` опционально) |
+| `update_draft_from_gdoc` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `announce`, `format` | Обновить поля черновика из документа Google Docs (`doc` — JSON из `readDocument(format='json')`) (`announce` опционально) |
 | `delete_draft` | `post_id: int` | Удалить черновик |
 | `resolve_hubs` | `aliases: list[str]`, `post_id: int \| None` | Алиасы хабов → числовые id |
+| `search_hubs` | `query: str = ""`, `limit: int = 40` | Поиск хабов по подстроке (возвращает `id  alias  title`); id — для аргумента `hubs` |
 | `list_flows` | `publication_id: int \| None` | Список потоков (id / алиас / название) |
 
 Инструменты автора публикуют страницы Docmost **и документы Google Docs** в
@@ -145,11 +146,7 @@ Docs API в промежуточное дерево в формате Docmost (T
 
 - `post_comment` → `POST articles/<id>/comments/add/` — подтверждён.
 - `vote_article` → `POST articles/<id>/votes/up|down/` — подтверждён.
-- `bookmark_article` (добавление) → `POST articles/<id>/bookmarks/` — подтверждён.
-- `vote_comment` → `POST articles/comments/<id>/votes/up|down/` —
-  **ЭКСПЕРИМЕНТАЛЬНО** (маршрут найден, не проверен на реальной сессии).
-- `bookmark_article` (удаление) → `DELETE articles/<id>/bookmarks/` —
-  **ЭКСПЕРИМЕНТАЛЬНО**, по возможности.
+- `vote_comment` → `POST articles/<article_id>/comments/<comment_id>/votes` с телом `{"value": 1|-1}` — проверено вживую (HTTP 200).
 
 Если Habr изменит маршруты — вся логика URL/тел/заголовков сосредоточена в
 `src/client.py`, правьте там.

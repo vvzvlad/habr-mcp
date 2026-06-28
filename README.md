@@ -7,7 +7,7 @@ Habr (and publish drafts) through Habr's internal, undocumented JSON API
 `https://habr.com/kek/v2/`.
 
 - **Read** works anonymously (search, feeds, article, comments).
-- **Write** (comment, vote, bookmark) and the **author/draft** tools require a
+- **Write** (comment, vote) and the **author/draft** tools require a
   logged-in session.
 
 The server runs over `streamable-http` and serves many users at once. There are
@@ -95,7 +95,7 @@ Write (requires a session):
 | --- | --- | --- |
 | `post_comment` | `article_id: int`, `text: str`, `parent_id: int \| None` | Comment (0/None = top level) |
 | `vote_article` | `article_id: int`, `direction: str` (`up`/`down`) | Vote on an article |
-| `vote_comment` | `comment_id: int`, `direction: str` | Vote on a comment (EXPERIMENTAL) |
+| `vote_comment` | `article_id: int`, `comment_id: int`, `direction: str` (`up`/`down`) | Vote on a comment |
 
 > `post_comment`, `vote_article` and `vote_comment` are **social tools**,
 > **disabled by default** — enable them with `HABR_MCP_ENABLE_SOCIAL_TOOLS=true`.
@@ -104,14 +104,15 @@ Author layer — drafts (requires an author session):
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `create_draft_from_docmost` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`, inline **or** an MCP `resource_link` to it) |
-| `create_draft_from_gdoc` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `format = "common"` | Create a draft from a Google Docs document (`doc` = JSON from `readDocument(format='json')`, inline **or** an MCP `resource_link` to it) |
+| `create_draft_from_docmost` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `announce`, `format = "common"` | `announce` = required teaser (100–3000 chars); Create a draft from a Docmost page (`doc` = ProseMirror JSON from `get_page_json`, inline **or** an MCP `resource_link` to it) |
+| `create_draft_from_gdoc` | `title: str`, `doc: str \| dict`, `hubs`, `tags`, `flow`, `announce`, `format = "common"` | `announce` = required teaser (100–3000 chars); Create a draft from a Google Docs document (`doc` = JSON from `readDocument(format='json')`, inline **or** an MCP `resource_link` to it) |
 | `get_draft` | `post_id: int` | Read a draft (summary + raw ProseMirror sources) |
 | `list_drafts` | `page: int = 1` | List the logged-in author's drafts (id, title, flow, hubs, tags) |
-| `update_draft_from_docmost` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields (read-modify-write autosave) |
-| `update_draft_from_gdoc` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `format` | Update draft fields from a Google Docs document (`doc` = JSON from `readDocument(format='json')`) |
+| `update_draft_from_docmost` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `announce`, `format` | Update draft fields (read-modify-write autosave) (`announce` optional) |
+| `update_draft_from_gdoc` | `post_id: int`, `title`, `doc`, `hubs`, `tags`, `flow`, `announce`, `format` | Update draft fields from a Google Docs document (`doc` = JSON from `readDocument(format='json')`) (`announce` optional) |
 | `delete_draft` | `post_id: int` | Delete a draft |
 | `resolve_hubs` | `aliases: list[str]`, `post_id: int \| None` | Hub aliases → numeric ids |
+| `search_hubs` | `query: str = ""`, `limit: int = 40` | Search hubs by substring (returns `id  alias  title`); pass an id to `hubs` |
 | `list_flows` | `publication_id: int \| None` | List flows (id / alias / title) |
 
 The author tools publish Docmost pages **and Google Docs documents** into Habr
@@ -143,11 +144,7 @@ Routes are confirmed at the route level (without auth they return
 
 - `post_comment` → `POST articles/<id>/comments/add/` — confirmed.
 - `vote_article` → `POST articles/<id>/votes/up|down/` — confirmed.
-- `bookmark_article` (add) → `POST articles/<id>/bookmarks/` — confirmed.
-- `vote_comment` → `POST articles/comments/<id>/votes/up|down/` — **EXPERIMENTAL**
-  (route found, not verified against a real session).
-- `bookmark_article` (remove) → `DELETE articles/<id>/bookmarks/` —
-  **EXPERIMENTAL**, best-effort.
+- `vote_comment` → `POST articles/<article_id>/comments/<comment_id>/votes` with body `{"value": 1|-1}` — verified live (HTTP 200).
 
 If Habr changes routes, all URL/body/header logic is centralised in
 `src/client.py` — fix it there.

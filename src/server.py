@@ -17,6 +17,7 @@ Tool descriptions are in Russian (LLM-facing); code/comments are in English.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator, Mapping
@@ -466,6 +467,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
         except HabrApiError as exc:
             return str(exc)
+        except (ValueError, RecursionError) as exc:
+            return (
+                "Документ doc не является валидным ProseMirror-документом "
+                "(ожидался объект с type=\"doc\", как отдаёт get_page_json). "
+                f"Подробности: {exc}"
+            )
         draft_id = _draft_id(result.get("response"))
         return (
             f"Черновик создан. id={draft_id}."
@@ -517,6 +524,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
         except HabrApiError as exc:
             return str(exc)
+        except (ValueError, RecursionError) as exc:
+            return (
+                "Документ doc не является валидным документом Google Docs "
+                "(ожидался JSON из readDocument(format='json')). "
+                f"Подробности: {exc}"
+            )
         draft_id = _draft_id(result.get("response"))
         return (
             f"Черновик создан. id={draft_id}."
@@ -612,6 +625,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
         except HabrApiError as exc:
             return str(exc)
+        except (ValueError, RecursionError) as exc:
+            return (
+                "Документ doc не является валидным ProseMirror-документом "
+                "(ожидался объект с type=\"doc\", как отдаёт get_page_json). "
+                f"Подробности: {exc}"
+            )
         return (
             f"Черновик {post_id} сохранён."
             + _warnings_suffix(result.get("warnings"))
@@ -668,6 +687,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
         except HabrApiError as exc:
             return str(exc)
+        except (ValueError, RecursionError) as exc:
+            return (
+                "Документ doc не является валидным документом Google Docs "
+                "(ожидался JSON из readDocument(format='json')). "
+                f"Подробности: {exc}"
+            )
         return (
             f"Черновик {post_id} сохранён."
             + _warnings_suffix(result.get("warnings"))
@@ -828,7 +853,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "залогиненного браузера (DevTools → Network → любой запрос к habr.com "
                 "→ Copy → значение заголовка Cookie) и вызови habr_login ещё раз."
             )
-        store.set(token, cookie, csrf, uuid)
+        await asyncio.to_thread(store.set, token, cookie, csrf, uuid)
         # Drop any cached client built from the OLD creds so the next tool call
         # rebuilds it from the freshly stored Cookie (e.g. after re-login).
         await registry.invalidate(token)

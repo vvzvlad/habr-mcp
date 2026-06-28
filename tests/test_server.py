@@ -774,6 +774,44 @@ async def test_create_draft_tool_rejects_bad_json(seeded_server):
     assert "Не удалось разобрать doc" in out
 
 
+async def test_create_draft_tool_rejects_wrong_shape_doc(seeded_server):
+    # Valid JSON but not a ProseMirror doc must yield a clean Russian message,
+    # not a raw ToolError leaking ValueError("not a ProseMirror document").
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": '{"foo": 1}',
+                "hubs": ["1"],
+                "tags": ["t"],
+                "flow": "2",
+                "announce": "a" * 150,
+            },
+        )
+    )
+    assert "ProseMirror" in out
+
+
+async def test_create_draft_from_gdoc_rejects_wrong_shape_doc(seeded_server):
+    # A gdoc tool must surface the Google-Docs-flavored Russian message,
+    # not the ProseMirror one, on a valid-JSON-but-wrong-shape doc.
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_gdoc",
+            {
+                "title": "T",
+                "doc": '{"foo": 1}',
+                "hubs": ["1"],
+                "tags": ["t"],
+                "flow": "2",
+                "announce": "a" * 150,
+            },
+        )
+    )
+    assert "Google Docs" in out
+
+
 # -- lifespan ----------------------------------------------------------------
 
 

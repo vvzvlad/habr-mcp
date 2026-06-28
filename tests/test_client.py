@@ -1261,6 +1261,75 @@ async def test_fetch_resource_follows_redirect(anon_settings):
     assert content_type == "image/png"
 
 
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        "http://127.0.0.1/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.5/x",
+        "http://192.168.1.10/x",
+        "http://100.64.0.1/x",
+        "http://[::1]/x",
+    ],
+)
+async def test_fetch_resource_blocks_internal_ip(anon_settings, blocked):
+    # SSRF guard must reject loopback / link-local / private targets. IP literals
+    # are screened with no DNS, so this needs no respx mock.
+    client = HabrClient(anon_settings)
+    try:
+        with pytest.raises(HabrApiError):
+            await client.fetch_resource(blocked)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("bad", ["ftp://internal/x", "file:///etc/passwd"])
+async def test_fetch_resource_rejects_non_http_scheme(anon_settings, bad):
+    client = HabrClient(anon_settings)
+    try:
+        with pytest.raises(HabrApiError):
+            await client.fetch_resource(bad)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_fetch_resource_blocks_redirect_to_internal(anon_settings):
+    # A public IP literal that 302-redirects to the cloud-metadata endpoint must
+    # be blocked on the redirect hop, not followed. The initial public IP literal
+    # is screened with no DNS (allowed), so this is fully deterministic.
+    start = "http://93.184.216.34/start"
+    respx.get(start).mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "http://169.254.169.254/latest/meta-data/"}
+        )
+    )
+    client = HabrClient(anon_settings)
+    try:
+        with pytest.raises(HabrApiError):
+            await client.fetch_resource(start)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_fetch_resource_allows_public_ip(anon_settings):
+    # A public IP literal must pass the guard and return the body.
+    url = "http://93.184.216.34/x.png"
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200, content=b"ok", headers={"Content-Type": "image/png"}
+        )
+    )
+    client = HabrClient(anon_settings)
+    try:
+        body, ct = await client.fetch_resource(url)
+    finally:
+        await client.aclose()
+    assert body == b"ok"
+    assert ct == "image/png"
+
+
 # -- image reupload (resolver, no Docmost token) -----------------------------
 
 
