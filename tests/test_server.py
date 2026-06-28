@@ -494,6 +494,44 @@ async def test_create_draft_from_gdoc_tool_reports_id(seeded_server):
     assert "id=888" in out
 
 
+@respx.mock
+async def test_create_draft_from_gdoc_accepts_dict(seeded_server):
+    # Regression: FastMCP pre-parses an object-shaped JSON string into a dict
+    # before validation, so ``doc`` arrives as a dict (not a string) — the tool
+    # must accept it instead of rejecting it at the schema layer.
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "555", "ok": True})
+    )
+    gdoc = {
+        "body": {
+            "content": [
+                {
+                    "paragraph": {
+                        "elements": [
+                            {"textRun": {"content": "Тело статьи из Google Docs.\n",
+                                         "textStyle": {}}}
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_gdoc",
+            {
+                "title": "T",
+                "doc": gdoc,
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=555" in out
+
+
 async def test_create_draft_from_gdoc_tool_rejects_bad_json(seeded_server):
     out = _text(
         await seeded_server.call_tool(

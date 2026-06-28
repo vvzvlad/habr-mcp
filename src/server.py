@@ -462,7 +462,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     )
     async def create_draft_from_gdoc(
         title: str,
-        doc: str,
+        doc: str | dict,
         ctx: Context,
         hubs: list[str] | None = None,
         tags: list[str] | None = None,
