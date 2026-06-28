@@ -29,7 +29,7 @@
 ```
 csrf-token: <36-символьный токен>      # обязателен для write; из <meta name="csrf-token">
 habr-user-uuid: <uuid>                  # дублирует cookie habr_uuid
-x-app-version: 2.329.0                  # версия фронта (живой билд июня 2026); шлётся
+x-app-version: 2.329.0                  # версия фронта; авто-определяется из ответного заголовка server-habr-version (значение — пример); шлётся
 accept: application/json, text/plain, */*  # как у реального браузера
 content-type: application/json
 origin: https://habr.com
