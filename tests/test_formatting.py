@@ -7,6 +7,7 @@ from src.formatting import (
     format_article,
     format_draft,
     format_drafts_list,
+    format_me,
     html_to_markdown,
     html_to_text,
 )
@@ -199,6 +200,47 @@ def test_format_article_empty_data_uses_placeholders_and_omits_hub_tag_lines():
     assert "сложность: —" in out
     assert "хабы:" not in out
     assert "теги:" not in out
+
+
+# --- format_me -----------------------------------------------------------
+
+
+def test_format_me_renders_identity():
+    # Full payload: identity, profile URL, karma (scoreStats.score) and rating.
+    out = format_me({
+        "id": "12345",
+        "alias": "vvzvlad",
+        "fullname": "VVZVlad",
+        "speciality": "Маг",
+        "rating": 42.5,
+        "scoreStats": {"score": 100},
+        "registerDateTime": "2015-03-01T12:00:00+00:00",
+    })
+    assert "@vvzvlad" in out
+    assert "VVZVlad" in out
+    assert "id: 12345" in out
+    assert "https://habr.com/ru/users/vvzvlad/" in out
+    assert "карма: 100" in out
+    assert "рейтинг: 42.5" in out
+
+
+def test_format_me_minimal_alias_only_does_not_crash():
+    # Minimal payload with just an alias -> renders @alias, no exception.
+    out = format_me({"alias": "x"})
+    assert "@x" in out
+
+
+def test_format_me_empty_has_no_profile_line():
+    # Empty dict -> still a string; without an alias there is no profile line.
+    out = format_me({})
+    assert isinstance(out, str)
+    assert "профиль:" not in out
+
+
+def test_format_me_none_does_not_raise():
+    # Defensive: a non-dict (None) must not raise.
+    out = format_me(None)
+    assert isinstance(out, str)
 
 
 # --- html_to_text edge case ----------------------------------------------

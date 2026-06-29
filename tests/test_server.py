@@ -174,6 +174,7 @@ async def test_tools_are_registered(anon_server):
         "list_flows",
         "habr_login",
         "auth_status",
+        "whoami",
     }
 
 
@@ -287,6 +288,33 @@ async def test_get_article_tool(seeded_server, article_payload):
     out = _text(await seeded_server.call_tool("get_article", {"article_id": 100}))
     assert "# Заголовок статьи" in out
     assert "## Раздел" in out
+
+
+@respx.mock
+async def test_whoami_tool(seeded_server):
+    # A single `me` mock covers both get_me() and the _ensure_app_version probe.
+    respx.get(f"{BASE_URL}me").mock(return_value=httpx.Response(200, json={
+        "id": "777", "alias": "vvzvlad", "fullname": "VVZVlad", "rating": 10,
+    }))
+    out = _text(await seeded_server.call_tool("whoami", {}))
+    assert "@vvzvlad" in out
+    assert "https://habr.com/ru/users/vvzvlad/" in out
+
+
+@respx.mock
+async def test_whoami_tool_handles_null_me(seeded_server):
+    # `me` returns null -> re-login guidance referencing habr_login.
+    respx.get(f"{BASE_URL}me").mock(return_value=httpx.Response(200, json=None))
+    out = _text(await seeded_server.call_tool("whoami", {}))
+    assert "habr_login" in out
+    # Fragment unique to the whoami re-login branch (not a generic guard message).
+    assert "cookie устарел" in out
+
+
+async def test_anon_whoami_returns_paste_key_guidance(anon_server):
+    # whoami on an anonymous server hands back the paste-key guidance.
+    out = _text(await anon_server.call_tool("whoami", {}))
+    assert "habr_login" in out
 
 
 @respx.mock

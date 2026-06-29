@@ -147,6 +147,53 @@ def format_article(data: dict[str, Any]) -> str:
     return "\n".join(meta) + "\n\n---\n\n" + body
 
 
+def format_me(data: dict[str, Any]) -> str:
+    """Render the currently logged-in Habr user as a compact Russian summary.
+
+    Shows login/alias, fullname, id and profile URL; optionally speciality,
+    karma, rating and registration date when those fields are present. Defensive
+    against missing keys and against ``data`` not being a dict.
+    """
+    if not isinstance(data, dict):
+        data = {}
+
+    alias = data.get("alias")
+    fullname = data.get("fullname") or "—"
+
+    lines = [
+        "Текущий пользователь Habr:",
+        f"логин: @{alias or '?'}",
+        f"имя: {fullname}",
+        f"id: {data.get('id', '?')}",
+    ]
+    # Profile URL only makes sense when we actually know the alias.
+    if alias:
+        lines.append(f"профиль: https://habr.com/ru/users/{alias}/")
+
+    spec = data.get("speciality")
+    if spec:
+        lines.append(f"специализация: {spec}")
+
+    # Karma lives under scoreStats.score; fall back to a top-level "karma".
+    score_stats = data.get("scoreStats")
+    karma = score_stats.get("score") if isinstance(score_stats, dict) else None
+    if karma is None:
+        karma = data.get("karma")
+    # bool is a subclass of int; exclude it so True/False never renders.
+    if isinstance(karma, (int, float)) and not isinstance(karma, bool):
+        lines.append(f"карма: {karma}")
+
+    rating = data.get("rating")
+    if isinstance(rating, (int, float)) and not isinstance(rating, bool):
+        lines.append(f"рейтинг: {rating}")
+
+    reg = data.get("registerDateTime")
+    if reg:
+        lines.append(f"дата регистрации: {_date_part(reg)}")
+
+    return "\n".join(lines)
+
+
 def format_draft(payload: dict[str, Any]) -> str:
     """Render a draft (``post-data`` response) as a compact Russian summary.
 

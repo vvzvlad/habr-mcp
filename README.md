@@ -72,6 +72,7 @@ Auth / session:
 | --- | --- | --- |
 | `habr_login` | `cookie: str` | Save your Habr session (full browser Cookie) for your token; the csrf token is auto-detected |
 | `auth_status` | — | Show your current auth state |
+| `whoami` | — | Show which Habr account you are logged in as (login, name, id, profile link) |
 
 Read (anonymous):
 

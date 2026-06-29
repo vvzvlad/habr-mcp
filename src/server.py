@@ -36,6 +36,7 @@ from src.formatting import (
     format_article,
     format_draft,
     format_drafts_list,
+    format_me,
     html_to_text,
 )
 from src.registry import ClientRegistry
@@ -794,5 +795,30 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # which key is active without leaking the key itself.
         fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8] if token else "????????"
         return f"Готово: Habr-логин активен (ключ {fingerprint}…)."
+
+    @mcp.tool(
+        name="whoami",
+        description=(
+            "Показать, под каким аккаунтом Habr ты сейчас залогинен: логин, имя, "
+            "id и ссылку на профиль (и карму/рейтинг, если доступны). Удобно, "
+            "чтобы понять, под кем выполняются операции."
+        ),
+    )
+    async def whoami(ctx: Context) -> str:
+        client, msg = await _ready_client(ctx)
+        if msg:
+            return msg
+        try:
+            data = await client.get_me()
+        except HabrApiError as exc:
+            return str(exc)
+        if not isinstance(data, dict) or not data.get("alias"):
+            # `me` returns null / an empty object when the stored cookie is no
+            # longer a valid logged-in session — tell the user to re-login.
+            return (
+                "Не удалось получить данные пользователя Habr — похоже, сессия "
+                "не активна или cookie устарел. Вызови habr_login со свежим Cookie."
+            )
+        return format_me(data)
 
     return mcp
