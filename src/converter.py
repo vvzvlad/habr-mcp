@@ -107,6 +107,18 @@ def _as_doc(value: Any) -> dict:
     raise ValueError("not a ProseMirror document")
 
 
+def _children(node: Any) -> list:
+    """Child list of ``node``, or ``[]`` when ``content`` is missing or not a list.
+
+    ProseMirror children always live in a list; centralizing this guard keeps
+    every tree walk total against malformed input where ``content`` is a
+    non-list (e.g. a stray scalar), mirroring the existing ``isinstance(..., list)``
+    guards in ``_convert_inline`` / ``_convert_blocks``.
+    """
+    content = node.get("content") if isinstance(node, dict) else None
+    return content if isinstance(content, list) else []
+
+
 # --- Heading-level normalization --------------------------------------------
 
 
@@ -129,7 +141,7 @@ def _min_heading_level(doc: dict) -> int:
                 levels.append(int((n.get("attrs") or {}).get("level", 1)))
             except (TypeError, ValueError):
                 levels.append(1)
-        for child in n.get("content") or []:
+        for child in _children(n):
             visit(child)
 
     visit(doc)
@@ -197,7 +209,7 @@ def collect_image_srcs(docmost_doc: dict) -> list[Any]:
             if key is not None and key not in seen:
                 seen.add(key)
                 srcs.append(src)
-        for child in node.get("content") or []:
+        for child in _children(node):
             visit(child)
 
     visit(doc)
@@ -392,7 +404,7 @@ def _collect_code_text(node: Any) -> str:
     if ntype == "hardBreak":
         return "\n"
     parts: list[str] = []
-    for child in node.get("content") or []:
+    for child in _children(node):
         parts.append(_collect_code_text(child))
     return "".join(parts)
 
@@ -555,7 +567,7 @@ def _build_table_cell(
     }
 
     paragraphs: list[dict] = []
-    for child in node.get("content") or []:
+    for child in _children(node):
         if not isinstance(child, dict):
             continue
         if child.get("type") == "paragraph":
@@ -591,11 +603,11 @@ def _build_table(
     ``table_cell``. A table with zero rows is dropped with a warning (returns []).
     """
     rows: list[dict] = []
-    for row in node.get("content") or []:
+    for row in _children(node):
         if not isinstance(row, dict) or row.get("type") != "tableRow":
             continue
         cells: list[dict] = []
-        for cell in row.get("content") or []:
+        for cell in _children(row):
             if not isinstance(cell, dict):
                 continue
             if cell.get("type") in ("tableCell", "tableHeader"):
@@ -822,7 +834,7 @@ def _convert_details(
     """
     summary_text = ""
     content_children: list[dict] = []
-    for child in node.get("content") or []:
+    for child in _children(node):
         if not isinstance(child, dict):
             continue
         ctype = child.get("type")
@@ -847,7 +859,7 @@ def _collect_plain_text(node: Any) -> str:
     if node.get("type") == "text":
         return node.get("text", "") or ""
     parts: list[str] = []
-    for child in node.get("content") or []:
+    for child in _children(node):
         parts.append(_collect_plain_text(child))
     return "".join(parts)
 
