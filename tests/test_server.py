@@ -680,6 +680,135 @@ async def test_create_draft_from_docmost_resource_link_malformed_uri(seeded_serv
     assert not save_route.called
 
 
+# -- _doc_link_uri helper + doc-arg leniency --------------------------------
+
+
+def test_doc_link_uri_recognizes_link_shapes():
+    from src.server import _doc_link_uri
+
+    # 1. canonical resource_link -> its uri
+    assert _doc_link_uri(
+        {"type": "resource_link", "uri": _DOC_LINK_URI}
+    ) == _DOC_LINK_URI
+    # 2. any other dict carrying a uri (no type:"doc") -> that uri
+    assert _doc_link_uri({"uri": "https://x/y.json"}) == "https://x/y.json"
+    # 3a. a bare http(s) URL string -> that string
+    assert _doc_link_uri("https://x/y.json") == "https://x/y.json"
+    # 3b. a data: URL string -> that string
+    assert _doc_link_uri("data:application/json,{}") == "data:application/json,{}"
+
+
+def test_doc_link_uri_returns_none_for_inline_docs():
+    from src.server import _doc_link_uri
+
+    # A serialized ProseMirror doc string is inline (starts with "{").
+    assert _doc_link_uri('{"type":"doc","content":[]}') is None
+    # A parsed inline doc dict is inline.
+    assert _doc_link_uri({"type": "doc", "content": []}) is None
+    # A plain non-URL string is inline.
+    assert _doc_link_uri("hello") is None
+    # Risk-bearing inline shapes with no top-level type/uri stay inline:
+    # a ProseMirror fragment, a doc-like object with content, and a
+    # Google-Docs-shaped object must NOT be mistaken for a link.
+    assert _doc_link_uri({"content": []}) is None
+    assert _doc_link_uri({"id": "x", "content": {}}) is None
+    assert _doc_link_uri({"title": "Doc", "body": {}}) is None
+
+
+def test_doc_link_uri_rejects_dirty_or_nonstring_uri():
+    from src.server import _doc_link_uri
+
+    # An empty/whitespace/non-string ``uri`` is not a usable link.
+    assert _doc_link_uri({"uri": ""}) is None
+    assert _doc_link_uri({"uri": "   "}) is None
+    assert _doc_link_uri({"uri": 123}) is None
+
+
+@respx.mock
+async def test_create_draft_from_docmost_accepts_bare_url_string(seeded_server,
+                                                                 docmost_doc):
+    import json as json_module
+
+    # A bare URL string is dereferenced like a resource_link.
+    respx.get(_DOC_LINK_URI).mock(
+        return_value=httpx.Response(200, content=json_module.dumps(docmost_doc).encode())
+    )
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "557", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": _DOC_LINK_URI,
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=557" in out
+
+
+@respx.mock
+async def test_create_draft_from_docmost_accepts_uri_object(seeded_server,
+                                                            docmost_doc):
+    import json as json_module
+
+    # A {"uri": ...} object (no type) is dereferenced like a resource_link.
+    respx.get(_DOC_LINK_URI).mock(
+        return_value=httpx.Response(200, content=json_module.dumps(docmost_doc).encode())
+    )
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "558", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": {"uri": _DOC_LINK_URI},
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=558" in out
+
+
+@respx.mock
+async def test_create_draft_from_docmost_json_string_not_fetched(seeded_server,
+                                                                 docmost_doc):
+    import json as json_module
+
+    # Regression: a doc passed as a JSON STRING stays inline — never fetched.
+    link_route = respx.get(_DOC_LINK_URI).mock(
+        return_value=httpx.Response(200, content=b"{}")
+    )
+    respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "559", "ok": True})
+    )
+    out = _text(
+        await seeded_server.call_tool(
+            "create_draft_from_docmost",
+            {
+                "title": "T",
+                "doc": json_module.dumps(docmost_doc),
+                "hubs": ["161"],
+                "tags": ["t1"],
+                "flow": "2",
+                "announce": "А" * 120,
+            },
+        )
+    )
+    assert "id=559" in out
+    assert not link_route.called
+
+
 def test_draft_id_reads_post_key():
     from src.server import _draft_id
 

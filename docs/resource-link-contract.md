@@ -26,6 +26,20 @@ optional metadata.
 A Docmost ProseMirror document is also an object but its `type` is `"doc"`, so it
 is never mistaken for a link.
 
+### 1.1 `doc` argument leniency (caller convenience)
+
+For the **`doc` tool argument** only, habr additionally accepts, as a caller
+convenience, two looser link shapes and dereferences them exactly like a
+`resource_link`:
+
+- a bare `http(s)`/`data:` URL **string** (e.g. `"https://…/page.json"`); and
+- a JSON object carrying a `uri` without `type: "doc"` (e.g. `{"uri": "…"}`).
+
+A serialized JSON **document** string always starts with `{`/`[`, so it is still
+always treated as **inline** content and never fetched. This leniency applies to
+the `doc` argument alone; the strict `iff type == "resource_link"` rule above
+still governs each image **`src`** value (§3.2).
+
 ## 2. Supported `uri` schemes
 
 | scheme            | how habr fetches it                                   |

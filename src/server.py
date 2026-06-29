@@ -159,22 +159,62 @@ def _parse_doc_arg(doc: Any) -> tuple[Any, str | None]:
         try:
             return json.loads(doc), None
         except (ValueError, TypeError) as exc:
-            return None, f"Не удалось разобрать doc как JSON: {exc}"
+            return None, (
+                f"Не удалось разобрать doc как JSON: {exc}. doc должен быть "
+                "JSON-документом ProseMirror (как get_page_json), MCP "
+                "resource_link {\"type\":\"resource_link\",\"uri\":\"<url>\"}, "
+                "либо http(s)/data:-URL на этот JSON."
+            )
     return doc, None
+
+
+def _doc_link_uri(doc: Any) -> str | None:
+    """Best-effort fetch uri for a tool's ``doc`` argument, else None.
+
+    Caller-convenience layer over the strict MCP resource_link contract
+    (docs/resource-link-contract.md §1). Recognizes, widest-to-strictest:
+    1. a canonical ``resource_link`` dict (``type == "resource_link"``);
+    2. any other dict with a non-empty string ``uri`` that is NOT an inline
+       doc (``type != "doc"``), e.g. ``{"uri": "..."}``;
+    3. a bare ``http(s)``/``data:`` URI string (a serialized JSON doc always
+       starts with ``{``/``[``, so it can never match here).
+    Returns None when ``doc`` is inline content (parsed downstream).
+    """
+    uri = resource_link_uri(doc)
+    if uri is not None:
+        return uri
+    if isinstance(doc, dict) and doc.get("type") != "doc":
+        candidate = doc.get("uri")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    if isinstance(doc, str):
+        stripped = doc.strip()
+        # Mirror fetch_resource's scheme handling: http(s) is matched
+        # case-insensitively (it lower-cases urlsplit().scheme), while data: is
+        # matched case-sensitively (it does uri.startswith("data:")).
+        if (
+            stripped.lower().startswith(("http://", "https://"))
+            or stripped.startswith("data:")
+        ):
+            return stripped
+    return None
 
 
 async def _resolve_doc_arg(
     client: HabrClient, doc: Any
 ) -> tuple[Any, str | None]:
-    """Resolve a tool's ``doc`` argument, expanding an MCP ``resource_link``.
+    """Resolve a tool's ``doc`` argument, expanding a link-shaped value.
 
-    If ``doc`` is a ``resource_link``, its ``uri`` is fetched over HTTP (or
-    decoded from a ``data:`` URI) and the bytes are parsed as JSON. Otherwise the
-    inline value is parsed as today. Returns ``(parsed, error)`` where ``error``
-    is a Russian message on a fetch or decode failure. A plain inline JSON string
-    is NEVER treated as a URL — only an actual ``resource_link`` triggers a fetch.
+    A link is detected by :func:`_doc_link_uri`, which accepts three shapes: a
+    canonical MCP ``resource_link``, any other dict carrying a ``uri`` (without
+    ``type == "doc"``), or a bare ``http(s)``/``data:`` URL string. Its ``uri``
+    is fetched over HTTP (or decoded from a ``data:`` URI) and the bytes are
+    parsed as JSON. Otherwise the inline value is parsed as today. Returns
+    ``(parsed, error)`` where ``error`` is a Russian message on a fetch or
+    decode failure. A plain inline JSON string is NEVER treated as a URL — a
+    serialized ProseMirror doc starts with ``{``/``[``, so it stays inline.
     """
-    uri = resource_link_uri(doc)
+    uri = _doc_link_uri(doc)
     if uri is not None:
         try:
             raw, _ = await client.fetch_resource(uri)
@@ -326,8 +366,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Создать черновик статьи на Habr из страницы Docmost (требует "
             "сохранённого авторского логина — вызови habr_login). Аргумент title — "
             "заголовок. Аргумент doc — ProseMirror-JSON документа Docmost (как "
-            "отдаёт get_page_json), строкой ЛИБО MCP resource_link на этот JSON "
-            "(habr сам скачает его по uri). Habr ТРЕБУЕТ: hubs — минимум один "
+            "отдаёт get_page_json); doc принимается строкой, dict, ЛИБО MCP "
+            "resource_link {\"type\":\"resource_link\",\"uri\":\"<url из "
+            "stash_page>\"} (habr сам скачает его по uri); также допустимы голый "
+            "http(s)/data:-URL строкой или объект {\"uri\":\"<url>\"}. Habr "
+            "ТРЕБУЕТ: hubs — минимум один "
             "числовой id хаба (резолвьте алиасы через resolve_hubs); tags — минимум "
             "один тег; flow — обязательный id потока (см. list_flows). Аргумент "
             "announce — ОБЯЗАТЕЛЬНЫЙ анонс «до ката» (100–3000 символов), отдельный "
@@ -368,6 +411,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return (
                 "Документ doc не является валидным ProseMirror-документом "
                 "(ожидался объект с type=\"doc\", как отдаёт get_page_json). "
+                "Если это ссылка — используйте resource_link "
+                "{\"type\":\"resource_link\",\"uri\":\"<url>\"} или "
+                "http(s)-URL строкой. "
                 f"Подробности: {exc}"
             )
         draft_id = _draft_id(result.get("response"))
@@ -382,8 +428,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Создать черновик статьи на Habr из документа Google Docs (требует "
             "сохранённого авторского логина — вызови habr_login). Аргумент title — "
             "заголовок. Аргумент doc — JSON документа Google Docs, как отдаёт "
-            "readDocument(format='json') у google-docs MCP, строкой ЛИБО MCP "
-            "resource_link на этот JSON (habr сам скачает его по uri). Habr "
+            "readDocument(format='json') у google-docs MCP; doc принимается "
+            "строкой, dict, ЛИБО MCP resource_link {\"type\":\"resource_link\","
+            "\"uri\":\"<url из stash_page>\"} (habr сам скачает его по uri); "
+            "также допустимы голый http(s)/data:-URL строкой или объект "
+            "{\"uri\":\"<url>\"}. Habr "
             "ТРЕБУЕТ: hubs — минимум один числовой id хаба (резолвьте алиасы через "
             "resolve_hubs); tags — минимум один тег; flow — обязательный id потока "
             "(см. list_flows). Аргумент announce — ОБЯЗАТЕЛЬНЫЙ анонс «до ката» "
@@ -425,6 +474,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return (
                 "Документ doc не является валидным документом Google Docs "
                 "(ожидался JSON из readDocument(format='json')). "
+                "Если это ссылка — используйте resource_link "
+                "{\"type\":\"resource_link\",\"uri\":\"<url>\"} или "
+                "http(s)-URL строкой. "
                 f"Подробности: {exc}"
             )
         draft_id = _draft_id(result.get("response"))
@@ -479,8 +531,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "требует авторского логина — вызови habr_login). Аргумент post_id — id "
             "черновика. Все остальные аргументы необязательны и перезаписывают "
             "соответствующие поля: title, doc (ProseMirror-JSON страницы Docmost "
-            "строкой, как get_page_json, ЛИБО MCP resource_link на этот JSON — "
-            "habr сам скачает его по uri), hubs, tags, flow, format. Аргумент "
+            "как get_page_json; принимается строкой, dict, ЛИБО MCP "
+            "resource_link {\"type\":\"resource_link\",\"uri\":\"<url из "
+            "stash_page>\"} — habr сам скачает его по uri; также допустимы голый "
+            "http(s)/data:-URL строкой или объект {\"uri\":\"<url>\"}), hubs, "
+            "tags, flow, format. Аргумент "
             "announce — анонс «до ката» (100–3000), отдельный текст; если передан "
             "— заменяет текущий анонс, иначе анонс не меняется. Возвращает "
             "результат и предупреждения конвертации."
@@ -526,6 +581,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return (
                 "Документ doc не является валидным ProseMirror-документом "
                 "(ожидался объект с type=\"doc\", как отдаёт get_page_json). "
+                "Если это ссылка — используйте resource_link "
+                "{\"type\":\"resource_link\",\"uri\":\"<url>\"} или "
+                "http(s)-URL строкой. "
                 f"Подробности: {exc}"
             )
         return (
@@ -541,8 +599,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "habr_login). Аргумент post_id — id черновика. Все остальные аргументы "
             "необязательны и перезаписывают соответствующие поля: title, doc (JSON "
             "документа Google Docs, как отдаёт readDocument(format='json') у "
-            "google-docs MCP, строкой, ЛИБО MCP resource_link на этот JSON — habr "
-            "сам скачает его по uri), hubs, tags, flow, format. Аргумент announce "
+            "google-docs MCP; принимается строкой, dict, ЛИБО MCP resource_link "
+            "{\"type\":\"resource_link\",\"uri\":\"<url из stash_page>\"} — habr "
+            "сам скачает его по uri; также допустимы голый http(s)/data:-URL "
+            "строкой или объект {\"uri\":\"<url>\"}), hubs, tags, flow, format. "
+            "Аргумент announce "
             "— анонс «до ката» (100–3000), отдельный текст; если передан — заменяет "
             "текущий анонс, иначе анонс не меняется. Возвращает результат и "
             "предупреждения конвертации."
@@ -588,6 +649,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return (
                 "Документ doc не является валидным документом Google Docs "
                 "(ожидался JSON из readDocument(format='json')). "
+                "Если это ссылка — используйте resource_link "
+                "{\"type\":\"resource_link\",\"uri\":\"<url>\"} или "
+                "http(s)-URL строкой. "
                 f"Подробности: {exc}"
             )
         return (
