@@ -55,8 +55,10 @@ _NON_HEADING_SUBTREES = {"table", "tableRow", "tableCell", "tableHeader"}
 _PREVIEW_MAX_CHARS = 3000
 
 # Docmost mark type -> Habr mark type. Marks not listed here are either dropped
-# silently (highlight/textStyle/comment) or dropped with a warning (anything
-# truly unknown). ``link`` is handled specially (its attrs are rewritten).
+# silently (highlight/textStyle/comment), handled explicitly (``spoiler`` keeps
+# its text and emits a once-warning, since Habr has no inline spoiler mark), or
+# dropped with a warning (anything truly unknown). ``link`` is handled specially
+# (its attrs are rewritten).
 _MARK_RENAME = {
     "bold": "bold",
     "italic": "italic",
@@ -227,7 +229,9 @@ def _convert_marks(
     """Convert a Docmost ``marks`` array into Habr marks.
 
     Unknown marks are dropped with a warning; ``highlight``/``textStyle``/
-    ``comment`` are dropped silently; ``link`` keeps only its ``href``.
+    ``comment`` are dropped silently; ``spoiler`` keeps its text and emits a
+    once-warning (Habr has no inline spoiler mark); ``link`` keeps only its
+    ``href``.
     """
     result: list[dict] = []
     if not isinstance(docmost_marks, list):
@@ -243,6 +247,11 @@ def _convert_marks(
             result.append({"type": "link", "attrs": {"href": href}})
         elif mtype in _MARK_DROP_SILENT:
             continue  # keep the text, drop the mark
+        elif mtype == "spoiler":
+            # Habr editorVersion-2 has no inline spoiler mark (only the block-level
+            # ``spoiler`` node), so an inline spoiler cannot be represented. Keep the
+            # text and warn once that the previously hidden text is now visible.
+            _warn_once(warnings, seen, "inline spoiler kept as plain text (Habr has no inline spoiler)")
         else:
             _warn(warnings, f"unsupported mark dropped: {mtype}")
     return result
@@ -474,8 +483,10 @@ def _build_image(
 ) -> dict | None:
     """Build a Habr ``image`` node, rewriting ``src`` via ``image_url_map``.
 
-    Returns ``None`` (and warns) if the original src has no mapped habrastorage
-    URL, signalling the caller to drop the node.
+    The Docmost image caption (``attrs.caption``, mirrors ``data-caption``) is
+    carried into Habr's ``image_caption`` child; a missing/blank caption stays
+    empty. Returns ``None`` (and warns) if the original src has no mapped
+    habrastorage URL, signalling the caller to drop the node.
     """
     attrs = node.get("attrs") or {}
     src = attrs.get("src")
@@ -490,6 +501,14 @@ def _build_image(
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    # Carry the Docmost image caption (``attrs.caption``, mirrors data-caption)
+    # into Habr's ``image_caption`` child. A missing or blank caption stays empty.
+    caption = attrs.get("caption")
+    if isinstance(caption, str) and caption.strip():
+        caption_node = {"type": "image_caption", "content": [{"type": "text", "text": caption}]}
+    else:
+        caption_node = {"type": "image_caption"}
 
     return {
         "type": "image",
@@ -506,7 +525,7 @@ def _build_image(
             "gallery": False,
             "inserted": False,
         },
-        "content": [{"type": "image_caption"}],
+        "content": [caption_node],
     }
 
 

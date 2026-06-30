@@ -478,6 +478,18 @@ def test_unknown_mark_dropped_with_warning():
     assert any("unsupported mark dropped: weird" in w for w in warnings)
 
 
+def test_inline_spoiler_mark_kept_as_plain_text_with_warning():
+    # Habr has no inline spoiler mark, so the text survives but the mark is
+    # dropped with a dedicated once-warning (not the generic "unsupported mark").
+    src = _doc(
+        {"type": "paragraph", "content": [_text("secret", [{"type": "spoiler"}])]}
+    )
+    warnings: list[str] = []
+    inline = docmost_to_habr_doc(src, warnings=warnings)["content"][0]["content"]
+    assert inline[0] == {"type": "text", "text": "secret"}
+    assert any("inline spoiler" in w for w in warnings)
+
+
 # --- mentions ----------------------------------------------------------------
 
 
@@ -768,6 +780,61 @@ def test_image_present_in_map_emitted_with_fullwidth_and_caption():
     assert img["attrs"]["title"] is None
     assert img["attrs"]["fullWidth"] is True
     assert img["content"] == [{"type": "image_caption"}]
+
+
+def test_image_with_caption_carries_text():
+    src = _doc(
+        {
+            "type": "image",
+            "attrs": {"src": "orig://a", "caption": "Рис. 1 — схема"},
+        }
+    )
+    out = docmost_to_habr_doc(src, image_url_map={"orig://a": "https://habrastorage/a.jpg"})
+    img = out["content"][0]
+    assert img["content"] == [
+        {"type": "image_caption", "content": [{"type": "text", "text": "Рис. 1 — схема"}]}
+    ]
+
+
+def test_image_blank_caption_stays_empty():
+    src = _doc(
+        {
+            "type": "image",
+            "attrs": {"src": "orig://a", "caption": "   "},
+        }
+    )
+    out = docmost_to_habr_doc(src, image_url_map={"orig://a": "https://habrastorage/a.jpg"})
+    img = out["content"][0]
+    assert img["content"] == [{"type": "image_caption"}]
+
+
+def test_image_non_string_caption_stays_empty():
+    # A non-string caption (e.g. a stray number) must not crash and stays empty.
+    src = _doc(
+        {
+            "type": "image",
+            "attrs": {"src": "orig://a", "caption": 123},
+        }
+    )
+    out = docmost_to_habr_doc(src, image_url_map={"orig://a": "https://habrastorage/a.jpg"})
+    img = out["content"][0]
+    assert img["content"] == [{"type": "image_caption"}]
+
+
+def test_image_caption_text_is_verbatim():
+    # Surrounding whitespace is significant in the emitted text: ``.strip()`` is
+    # only used to decide presence, never to mutate the caption that is emitted.
+    src = _doc(
+        {
+            "type": "image",
+            "attrs": {"src": "orig://a", "caption": "  hi  "},
+        }
+    )
+    out = docmost_to_habr_doc(src, image_url_map={"orig://a": "https://habrastorage/a.jpg"})
+    img = out["content"][0]
+    assert img["content"] == [
+        {"type": "image_caption", "content": [{"type": "text", "text": "  hi  "}]}
+    ]
 
 
 def test_image_not_in_map_dropped_with_warning():
