@@ -1401,6 +1401,221 @@ def test_make_preview_doc_cap_keeps_most_when_only_early_space():
     assert len(text) >= 1500  # not collapsed to "См"
 
 
+# --- footnotes -> abbr tooltips ----------------------------------------------
+
+
+def _notes_section(heading_text: str, *item_texts: str, start: int | None = None) -> list:
+    """Build a footnote heading + orderedList (one paragraph listItem per text)."""
+    items = [
+        {"type": "listItem", "content": [{"type": "paragraph", "content": [_text(t)]}]}
+        for t in item_texts
+    ]
+    ol: dict = {"type": "orderedList", "content": items}
+    if start is not None:
+        ol["attrs"] = {"start": start}
+    return [
+        {"type": "heading", "attrs": {"level": 1}, "content": [_text(heading_text)]},
+        ol,
+    ]
+
+
+def _iter_text_nodes(node):
+    """Yield every text node in the tree."""
+    if isinstance(node, dict):
+        if node.get("type") == "text":
+            yield node
+        for child in node.get("content", []) or []:
+            yield from _iter_text_nodes(child)
+
+
+def _find_abbr_word(tree, word: str):
+    """Return the first text node whose text == word and carries an abbr mark."""
+    for tn in _iter_text_nodes(tree):
+        if tn.get("text") == word:
+            for m in tn.get("marks", []):
+                if m.get("type") == "abbr":
+                    return tn
+    return None
+
+
+def _all_text(tree) -> str:
+    return "".join(tn.get("text", "") for tn in _iter_text_nodes(tree))
+
+
+def _has_ordered_list(tree) -> bool:
+    if isinstance(tree, dict):
+        if tree.get("type") == "ordered_list":
+            return True
+        return any(_has_ordered_list(c) for c in tree.get("content", []) or [])
+    return False
+
+
+def _has_notes_heading(tree) -> bool:
+    for node in tree.get("content", []):
+        if node.get("type") == "heading":
+            txt = "".join(tn.get("text", "") for tn in _iter_text_nodes(node))
+            if txt.strip().lower() in {"примечания переводчика", "notes"}:
+                return True
+    return False
+
+
+def test_footnote_basic_abbr_and_section_removed():
+    src = _doc(
+        {"type": "paragraph", "content": [_text("это важное слово[1] дальше")]},
+        *_notes_section("Примечания переводчика", "пояснение к слову"),
+    )
+    out = docmost_to_habr_doc(src)
+    # Notes section is gone.
+    assert not _has_notes_heading(out)
+    assert not _has_ordered_list(out)
+    # The word before [1] carries an abbr tooltip with the note text.
+    node = _find_abbr_word(out, "слово")
+    assert node is not None
+    abbr = [m for m in node["marks"] if m["type"] == "abbr"][0]
+    assert abbr["attrs"]["title"] == "пояснение к слову"
+    # The marker is gone; surrounding text preserved.
+    joined = _all_text(out)
+    assert "[1]" not in joined
+    assert joined == "это важное слово дальше"
+
+
+def test_footnote_marker_with_space_before():
+    src = _doc(
+        {"type": "paragraph", "content": [_text("слово [1]")]},
+        *_notes_section("Примечания переводчика", "пояснение"),
+    )
+    out = docmost_to_habr_doc(src)
+    assert _all_text(out) == "слово"
+    node = _find_abbr_word(out, "слово")
+    assert node is not None
+    assert [m for m in node["marks"] if m["type"] == "abbr"][0]["attrs"]["title"] == "пояснение"
+
+
+def test_footnote_word_keeps_existing_mark():
+    # "слово" is bold; the marker [1] is a separate plain text node.
+    src = _doc(
+        {
+            "type": "paragraph",
+            "content": [_text("слово", marks=[{"type": "bold"}]), _text("[1]")],
+        },
+        *_notes_section("Примечания переводчика", "note text"),
+    )
+    out = docmost_to_habr_doc(src)
+    node = _find_abbr_word(out, "слово")
+    assert node is not None
+    types = {m["type"] for m in node["marks"]}
+    assert "bold" in types and "abbr" in types
+
+
+def test_footnote_unknown_number_left_as_text():
+    warnings: list[str] = []
+    src = _doc(
+        {"type": "paragraph", "content": [_text("x[9]")]},
+        *_notes_section("Примечания переводчика", "only note one"),
+    )
+    out = docmost_to_habr_doc(src, warnings=warnings)
+    # Unknown marker stays literal; no abbr applied.
+    assert "[9]" in _all_text(out)
+    assert _find_abbr_word(out, "x") is None
+    # Notes section is still removed.
+    assert not _has_notes_heading(out)
+    assert not _has_ordered_list(out)
+    assert warnings  # a warning was recorded
+
+
+def test_footnote_no_heading_leaves_marker():
+    src = _doc({"type": "paragraph", "content": [_text("слово[1] дальше")]})
+    out = docmost_to_habr_doc(src)
+    assert "[1]" in _all_text(out)
+    assert _find_abbr_word(out, "слово") is None
+
+
+def test_footnote_english_notes_heading_detected():
+    src = _doc(
+        {"type": "paragraph", "content": [_text("word[1] more")]},
+        *_notes_section("Notes", "the explanation"),
+    )
+    out = docmost_to_habr_doc(src)
+    assert not _has_ordered_list(out)
+    node = _find_abbr_word(out, "word")
+    assert node is not None
+    assert [m for m in node["marks"] if m["type"] == "abbr"][0]["attrs"]["title"] == "the explanation"
+
+
+def test_footnote_ordered_list_start_offset():
+    # start=2 means the first (and only) list item maps to marker [2].
+    src = _doc(
+        {"type": "paragraph", "content": [_text("first[2] second")]},
+        *_notes_section("Примечания переводчика", "second note", start=2),
+    )
+    out = docmost_to_habr_doc(src)
+    node = _find_abbr_word(out, "first")
+    assert node is not None
+    assert [m for m in node["marks"] if m["type"] == "abbr"][0]["attrs"]["title"] == "second note"
+    assert "[2]" not in _all_text(out)
+
+
+def test_footnote_adjacent_markers_merge_titles():
+    # word[1][2]: both markers attach to the same word; titles are merged and no
+    # content is lost (regression: the 2nd marker used to be dropped silently).
+    src = _doc(
+        {"type": "paragraph", "content": [_text("слово[1][2] дальше")]},
+        *_notes_section("Примечания переводчика", "one", "two"),
+    )
+    out = docmost_to_habr_doc(src)
+    node = _find_abbr_word(out, "слово")
+    assert node is not None
+    abbr = [m for m in node["marks"] if m["type"] == "abbr"][0]
+    assert abbr["attrs"]["title"] == "one; two"
+    joined = _all_text(out)
+    assert "[1]" not in joined and "[2]" not in joined
+    assert joined == "слово дальше"
+
+
+def test_footnote_marker_at_run_start_left_as_text():
+    # A marker with no real preceding word (start of run) is left literal + warns.
+    warnings: list[str] = []
+    src = _doc(
+        {"type": "paragraph", "content": [_text("[1] текст")]},
+        *_notes_section("Примечания переводчика", "note one"),
+    )
+    out = docmost_to_habr_doc(src, warnings=warnings)
+    assert "[1]" in _all_text(out)
+    assert _find_abbr_word(out, "текст") is None
+    assert any("no preceding word" in w for w in warnings)
+
+
+def test_abbr_mark_without_title_becomes_plain_text():
+    # A Docmost abbr mark with no attrs/title must not emit an empty-title abbr;
+    # the text passes through unmarked and nothing crashes.
+    src = _doc(
+        {"type": "paragraph", "content": [_text("слово", marks=[{"type": "abbr"}])]}
+    )
+    out = docmost_to_habr_doc(src)
+    node = out["content"][0]["content"][0]
+    assert node == {"type": "text", "text": "слово"}
+
+
+def test_footnote_lone_earlier_heading_does_not_shadow_real_section():
+    # An earlier bare "Notes" heading (no list) must not shadow the later real
+    # "Примечания переводчика" heading + orderedList.
+    src = _doc(
+        {"type": "heading", "attrs": {"level": 1}, "content": [_text("Notes")]},
+        {"type": "paragraph", "content": [_text("слово[1] дальше")]},
+        *_notes_section("Примечания переводчика", "пояснение"),
+    )
+    out = docmost_to_habr_doc(src)
+    # The real notes section (heading + list) is removed; marker resolved.
+    assert not _has_ordered_list(out)
+    node = _find_abbr_word(out, "слово")
+    assert node is not None
+    assert [m for m in node["marks"] if m["type"] == "abbr"][0]["attrs"]["title"] == "пояснение"
+    assert "[1]" not in _all_text(out)
+    # The lone earlier "Notes" heading is preserved (not part of a notes section).
+    headings = [n for n in out["content"] if n.get("type") == "heading"]
+    assert any(_all_text(h) == "Notes" for h in headings)
+
+
 # ==========================================================================
 # Phase 3: robustness ("dirty input does not crash") + targeted edge cases
 # ==========================================================================

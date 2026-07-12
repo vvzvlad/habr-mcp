@@ -31,6 +31,7 @@ Design notes:
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any
@@ -245,6 +246,15 @@ def _convert_marks(
         elif mtype == "link":
             href = (mark.get("attrs") or {}).get("href")
             result.append({"type": "link", "attrs": {"href": href}})
+        elif mtype == "abbr":
+            # The footnote preprocessing writes Docmost-flavoured abbr marks onto
+            # text nodes; translate them to Habr's abbr mark (hover tooltip),
+            # keeping the title. Without this branch they'd be dropped as unknown.
+            # An abbr with no usable title carries no tooltip, so drop it (keep the
+            # text unmarked) rather than emit an empty/null title.
+            title = (mark.get("attrs") or {}).get("title")
+            if isinstance(title, str) and title:
+                result.append({"type": "abbr", "attrs": {"title": title}})
         elif mtype in _MARK_DROP_SILENT:
             continue  # keep the text, drop the mark
         elif mtype == "spoiler":
@@ -883,6 +893,273 @@ def _collect_plain_text(node: Any) -> str:
     return "".join(parts)
 
 
+# --- Footnotes -> abbr tooltips ----------------------------------------------
+
+# Top-level heading titles (lowercased/stripped) that introduce a translator's
+# footnotes section. The section is a heading followed by an orderedList whose
+# i-th item is note i.
+_FOOTNOTE_HEADINGS = {
+    "примечания переводчика",
+    "примечания",
+    "сноски",
+    "notes",
+    "footnotes",
+    "translator's notes",
+}
+
+# A plain-text footnote marker like ``[1]`` placed right after a word in the body.
+_FOOTNOTE_MARKER_RE = re.compile(r"\[(\d+)\]")
+
+
+def _apply_footnote_markers(
+    inline_nodes: list,
+    notes: dict[int, str],
+    warnings: list[str] | None,
+    seen: set[str],
+) -> list:
+    """Rewrite ``[N]`` markers in one inline list into abbr tooltips.
+
+    For each marker whose number is in ``notes``: attach an ``abbr`` mark (title
+    = the note text) to the last word BEFORE the marker, and delete the marker
+    (plus a single preceding space, if any). Markers with no matching note or no
+    preceding word are left as literal text (with a once-warning).
+    """
+    # Split the inline list into maximal runs of consecutive ``text`` nodes,
+    # separated by non-text inline nodes (mention/hardBreak/mathInline/...), which
+    # are passed through untouched to preserve order.
+    result: list = []
+    run: list[dict] = []
+
+    def flush_run() -> None:
+        if run:
+            result.extend(_rewrite_text_run(run, notes, warnings, seen))
+            run.clear()
+
+    for node in inline_nodes:
+        if isinstance(node, dict) and node.get("type") == "text":
+            run.append(node)
+        else:
+            flush_run()
+            result.append(node)
+    flush_run()
+    return result
+
+
+def _rewrite_text_run(
+    run: list[dict],
+    notes: dict[int, str],
+    warnings: list[str] | None,
+    seen: set[str],
+) -> list[dict]:
+    """Rewrite a single run of consecutive ``text`` nodes (see caller)."""
+    # Build the combined string and a per-character parallel array of marks.
+    combined_chars: list[str] = []
+    char_marks: list[list] = []
+    for node in run:
+        text = node.get("text", "") or ""
+        marks = node.get("marks") if isinstance(node.get("marks"), list) else []
+        for ch in text:
+            combined_chars.append(ch)
+            char_marks.append(marks)
+    combined = "".join(combined_chars)
+
+    matches = [(m.start(), m.end(), int(m.group(1))) for m in _FOOTNOTE_MARKER_RE.finditer(combined)]
+    # Every char index covered by ANY marker span. Used so the word-search can
+    # SKIP OVER adjacent markers (e.g. ``word[1][2]``) to reach the real word,
+    # letting several markers attach to the same word.
+    blocked: set[int] = set()
+    for m0, m1, _num in matches:
+        blocked.update(range(m0, m1))
+
+    deleted = [False] * len(combined)
+    # Word span (start, end) -> ordered list of note titles attached to it. A
+    # given word span is either shared by markers (identical span) or disjoint
+    # from other words, so per-char titles never conflict.
+    word_titles: dict[tuple[int, int], list[str]] = {}
+
+    for m0, m1, num in matches:
+        if num not in notes:
+            _warn_once(warnings, seen, "footnote marker with no matching note left as text")
+            continue
+        # Optionally drop the single space directly before the marker.
+        if m0 > 0 and combined[m0 - 1].isspace():
+            del_start = m0 - 1
+        else:
+            del_start = m0
+        # Skip trailing whitespace and adjacent marker spans to reach the real
+        # word end (whitespace via isspace(); prior/next markers via ``blocked``).
+        j = del_start
+        while j > 0 and (combined[j - 1].isspace() or (j - 1) in blocked):
+            j -= 1
+        w_end = j
+        w_start = j
+        while w_start > 0 and not combined[w_start - 1].isspace() and (w_start - 1) not in blocked:
+            w_start -= 1
+        if w_start == w_end:
+            _warn_once(warnings, seen, "footnote marker with no preceding word left as text")
+            continue
+        word_titles.setdefault((w_start, w_end), []).append(notes[num])
+        for i in range(del_start, m1):
+            deleted[i] = True
+
+    # Build per-char abbr titles: each word span gets ONE merged title (its notes
+    # joined with "; " in marker order, dropping consecutive duplicates).
+    abbr_titles: list[str | None] = [None] * len(combined)
+    for (w_start, w_end), titles in word_titles.items():
+        merged: list[str] = []
+        for t in titles:
+            if not merged or merged[-1] != t:
+                merged.append(t)
+        joined = "; ".join(merged)
+        for i in range(w_start, w_end):
+            abbr_titles[i] = joined
+
+    # Rebuild the run: keep non-deleted chars, merging consecutive chars whose
+    # effective marks (original marks + abbr mark when set) are equal by value.
+    rebuilt: list[dict] = []
+    cur_text: list[str] = []
+    cur_marks: list | None = None
+
+    def flush() -> None:
+        nonlocal cur_marks
+        if cur_text:
+            node: dict[str, Any] = {"type": "text", "text": "".join(cur_text)}
+            if cur_marks:
+                node["marks"] = cur_marks
+            rebuilt.append(node)
+            cur_text.clear()
+            cur_marks = None
+
+    for i, ch in enumerate(combined):
+        if deleted[i]:
+            continue
+        marks = list(char_marks[i])
+        if abbr_titles[i] is not None:
+            marks = marks + [{"type": "abbr", "attrs": {"title": abbr_titles[i]}}]
+        eff = marks if marks else []
+        if cur_text and eff == (cur_marks or []):
+            cur_text.append(ch)
+        else:
+            flush()
+            cur_text.append(ch)
+            cur_marks = eff
+    flush()
+    return rebuilt
+
+
+def _find_footnote_section(content: list) -> tuple[int, int] | None:
+    """Locate the notes section in a top-level content list.
+
+    Returns ``(heading_index, list_index)`` for the FIRST footnote heading
+    followed (skipping blank paragraphs) by an ``orderedList``, else ``None``.
+    """
+    for i, node in enumerate(content):
+        if not isinstance(node, dict) or node.get("type") != "heading":
+            continue
+        title = _collect_plain_text(node).strip().lower()
+        if title not in _FOOTNOTE_HEADINGS:
+            continue
+        # The notes list is the next top-level node, skipping blank paragraphs.
+        j = i + 1
+        while j < len(content):
+            nxt = content[j]
+            if not isinstance(nxt, dict):
+                break
+            ntype = nxt.get("type")
+            if ntype == "orderedList":
+                return (i, j)
+            if ntype == "paragraph" and not _collect_plain_text(nxt).strip():
+                j += 1
+                continue
+            break  # something else in between -> this heading does not qualify
+        # This matching heading is not followed by an orderedList; keep scanning
+        # for a later footnote heading that is (a lone "Notes" heading earlier in
+        # the doc must not shadow the real notes section further down).
+    return None
+
+
+def _build_footnote_map(ordered_list: dict) -> dict[int, str]:
+    """Build a number -> note-text map from the notes ``orderedList``."""
+    attrs = ordered_list.get("attrs") or {}
+    start_raw = attrs.get("start")
+    start = start_raw if isinstance(start_raw, int) and start_raw > 0 else 1
+    notes: dict[int, str] = {}
+    p = 0
+    for item in _children(ordered_list):
+        if not isinstance(item, dict) or item.get("type") != "listItem":
+            continue
+        number = start + p
+        p += 1
+        text = " ".join(_collect_plain_text(item).split())
+        if text:
+            notes[number] = text
+    return notes
+
+
+def _inline_footnotes_as_abbr(
+    doc: dict,
+    warnings: list[str] | None,
+    seen: set[str],
+) -> dict:
+    """Turn Docmost footnotes into Habr abbr tooltips (see module docstring).
+
+    Attaches each note's text as an abbr tooltip on the last word before its
+    ``[N]`` marker (removing the marker), and removes the bottom notes section
+    (heading + orderedList). Returns a NEW doc; the input is never mutated. If no
+    footnote section is found the doc is returned unchanged (no-op safety case).
+    """
+    doc = copy.deepcopy(doc)
+    content = doc.get("content")
+    if not isinstance(content, list):
+        return doc
+
+    located = _find_footnote_section(content)
+    if located is None:
+        return doc  # no matching heading + list -> leave markers alone
+    heading_idx, list_idx = located
+
+    notes = _build_footnote_map(content[list_idx])
+    if not notes:
+        return doc  # nothing usable -> leave the doc unchanged
+
+    # Remove the notes section (heading + orderedList) by index/identity.
+    new_content = [
+        node for k, node in enumerate(content) if k not in (heading_idx, list_idx)
+    ]
+
+    referenced: set[int] = set()
+
+    def rewrite(node: Any) -> None:
+        """Recursively rewrite markers in every inline container in the tree."""
+        if not isinstance(node, dict):
+            return
+        children = node.get("content")
+        if isinstance(children, list):
+            if any(isinstance(c, dict) and c.get("type") == "text" for c in children):
+                before = _FOOTNOTE_MARKER_RE.findall(
+                    "".join(
+                        c.get("text", "")
+                        for c in children
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                )
+                node["content"] = _apply_footnote_markers(children, notes, warnings, seen)
+                for num in before:
+                    if int(num) in notes:
+                        referenced.add(int(num))
+            for c in children:
+                rewrite(c)
+
+    for node in new_content:
+        rewrite(node)
+
+    if set(notes) - referenced:
+        _warn_once(warnings, seen, "some footnotes were never referenced by a marker")
+
+    doc["content"] = new_content
+    return doc
+
+
 # --- Public API: full document conversion ------------------------------------
 
 
@@ -901,6 +1178,8 @@ def docmost_to_habr_doc(
     """
     doc = _as_doc(docmost_doc)
     seen: set[str] = set()
+    # Turn Docmost footnotes ([N] markers + bottom notes list) into Habr abbr tooltips.
+    doc = _inline_footnotes_as_abbr(doc, warnings, seen)
     # Normalize so the document's top heading becomes Habr level 1 (<h2>); Docmost
     # bodies usually start at H2 because the page title is a separate field.
     heading_min_level = _min_heading_level(doc)
