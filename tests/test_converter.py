@@ -855,11 +855,90 @@ def test_image_none_map_dropped():
 
 
 def test_unknown_block_atom_dropped_with_warning():
-    src = _doc({"type": "drawio", "attrs": {"id": "1"}})
+    # A genuinely-unknown childless atom hits the fallback drop branch.
+    # (drawio/excalidraw are NO LONGER unknown — they convert to images.)
+    src = _doc({"type": "someUnknownAtom", "attrs": {"id": "1"}})
     warnings: list[str] = []
     out = docmost_to_habr_doc(src, warnings=warnings)
     assert out["content"] == []
-    assert any("unsupported block dropped: drawio" in w for w in warnings)
+    assert any("unsupported block dropped: someUnknownAtom" in w for w in warnings)
+
+
+# --- diagrams (drawio / excalidraw) ------------------------------------------
+
+
+def test_drawio_present_in_map_emitted_as_image():
+    # A drawio node carries its rendered raster in attrs.src, exactly like an
+    # image, so it converts to a Habr image with the rewritten habrastorage src.
+    src = _doc(
+        {
+            "type": "drawio",
+            "attrs": {"src": "orig://d", "alt": "D", "width": "100", "height": 200},
+        }
+    )
+    out = docmost_to_habr_doc(src, image_url_map={"orig://d": "https://habrastorage/d.png"})
+    img = out["content"][0]
+    assert img["type"] == "image"
+    assert img["attrs"]["src"] == "https://habrastorage/d.png"
+    assert img["attrs"]["alt"] == "D"
+    assert img["attrs"]["width"] == 100  # coerced from string
+    assert img["attrs"]["height"] == 200
+    assert img["attrs"]["fullWidth"] is True
+    assert img["content"] == [{"type": "image_caption"}]
+
+
+def test_drawio_not_in_map_dropped_with_warning():
+    src = _doc({"type": "drawio", "attrs": {"src": "orig://missing"}})
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings)
+    assert out["content"] == []
+    assert any("drawio dropped (no habrastorage url): orig://missing" in w for w in warnings)
+
+
+def test_excalidraw_present_in_map_emitted_as_image():
+    src = _doc({"type": "excalidraw", "attrs": {"src": "orig://e", "alt": "E"}})
+    out = docmost_to_habr_doc(src, image_url_map={"orig://e": "https://habrastorage/e.svg"})
+    img = out["content"][0]
+    assert img["type"] == "image"
+    assert img["attrs"]["src"] == "https://habrastorage/e.svg"
+    assert img["attrs"]["alt"] == "E"
+    assert img["content"] == [{"type": "image_caption"}]
+
+
+def test_excalidraw_not_in_map_dropped_with_warning():
+    src = _doc({"type": "excalidraw", "attrs": {"src": "orig://gone"}})
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings)
+    assert out["content"] == []
+    assert any("excalidraw dropped (no habrastorage url): orig://gone" in w for w in warnings)
+
+
+def test_drawio_missing_src_dropped_with_warning():
+    # A never-drawn diagram has no src at all -> dropped like an unmapped image.
+    src = _doc({"type": "drawio", "attrs": {}})
+    warnings: list[str] = []
+    out = docmost_to_habr_doc(src, image_url_map={"orig://x": "https://h/x.png"}, warnings=warnings)
+    assert out["content"] == []
+    assert any("drawio dropped (no habrastorage url): None" in w for w in warnings)
+
+
+def test_drawio_resource_link_src_rewritten_via_map():
+    # A resource_link src is keyed by its uri via image_src_key, same as images.
+    link = {"type": "resource_link", "uri": "res://diagram1"}
+    src = _doc({"type": "drawio", "attrs": {"src": link}})
+    out = docmost_to_habr_doc(src, image_url_map={"res://diagram1": "https://habrastorage.org/x.png"})
+    img = out["content"][0]
+    assert img["type"] == "image"
+    assert img["attrs"]["src"] == "https://habrastorage.org/x.png"
+
+
+def test_collect_image_srcs_includes_diagram_nodes():
+    # collect_image_srcs must return drawio/excalidraw srcs so they are uploaded.
+    src = _doc(
+        {"type": "drawio", "attrs": {"src": "d.png"}},
+        {"type": "excalidraw", "attrs": {"src": "e.svg"}},
+    )
+    assert collect_image_srcs(src) == ["d.png", "e.svg"]
 
 
 def test_unknown_wrapper_block_flattened_preserves_children():

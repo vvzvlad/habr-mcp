@@ -19,7 +19,8 @@ Handled Docmost node families (everything else degrades gracefully):
   ``blockquote``, ``bulletList``/``orderedList``/``listItem`` (+ ``taskList``/
   ``taskItem``), ``callout``, ``details``, ``image``, ``table`` (with
   ``tableRow``/``tableCell``/``tableHeader``), ``mathBlock``, ``embed``/
-  ``youtube``;
+  ``youtube``, ``drawio``/``excalidraw`` (converted to a Habr image via the
+  rendered raster in ``attrs.src``);
 - inline: ``text`` (+ marks), ``hardBreak``, ``mention``, ``mathInline``.
 
 Design notes:
@@ -192,12 +193,15 @@ def image_src_key(src: Any) -> str | None:
 
 
 def collect_image_srcs(docmost_doc: dict) -> list[Any]:
-    """De-duplicated original ``attrs.src`` VALUES for every Docmost ``image``.
+    """De-duplicated original ``attrs.src`` VALUES for every Docmost ``image``
+    and diagram node (``drawio``/``excalidraw``).
 
-    Each value is returned as-is (a str URL/data-URI OR a ``resource_link`` dict)
-    in document order, de-duplicated by ``image_src_key``. Values whose key is
-    None (empty/missing/unsupported src) are skipped. Only ``_reupload_images``
-    consumes this.
+    A drawio/excalidraw node carries a rendered raster (PNG/SVG) in ``attrs.src``
+    exactly like an image, so its src is collected for the same habrastorage
+    upload. Each value is returned as-is (a str URL/data-URI OR a
+    ``resource_link`` dict) in document order, de-duplicated by
+    ``image_src_key``. Values whose key is None (empty/missing/unsupported src)
+    are skipped. Only ``_reupload_images`` consumes this.
     """
     doc = _as_doc(docmost_doc)
     srcs: list[Any] = []
@@ -206,7 +210,7 @@ def collect_image_srcs(docmost_doc: dict) -> list[Any]:
     def visit(node: Any) -> None:
         if not isinstance(node, dict):
             return
-        if node.get("type") == "image":
+        if node.get("type") in ("image", "drawio", "excalidraw"):
             src = (node.get("attrs") or {}).get("src")
             key = image_src_key(src)
             if key is not None and key not in seen:
@@ -490,19 +494,22 @@ def _build_image(
     node: dict,
     image_url_map: dict[str, str] | None,
     warnings: list[str] | None,
+    kind: str = "image",
 ) -> dict | None:
     """Build a Habr ``image`` node, rewriting ``src`` via ``image_url_map``.
 
     The Docmost image caption (``attrs.caption``, mirrors ``data-caption``) is
     carried into Habr's ``image_caption`` child; a missing/blank caption stays
     empty. Returns ``None`` (and warns) if the original src has no mapped
-    habrastorage URL, signalling the caller to drop the node.
+    habrastorage URL, signalling the caller to drop the node. ``kind`` only
+    tunes the drop-warning label (e.g. "drawio"/"excalidraw" for diagram nodes,
+    which share this builder because their raster lives in ``attrs.src`` too).
     """
     attrs = node.get("attrs") or {}
     src = attrs.get("src")
     key = image_src_key(src)
     if not image_url_map or key is None or key not in image_url_map:
-        _warn(warnings, f"image dropped (no habrastorage url): {src}")
+        _warn(warnings, f"{kind} dropped (no habrastorage url): {src}")
         return None
     new_src = image_url_map[key]
 
@@ -803,6 +810,12 @@ def _convert_block(
 
     if ntype == "image":
         built = _build_image(node, image_url_map, warnings)
+        return [built] if built is not None else []
+
+    if ntype in ("drawio", "excalidraw"):
+        # A diagram node carries its rendered raster in attrs.src, exactly like
+        # an image, so it converts to a Habr image via the same builder.
+        built = _build_image(node, image_url_map, warnings, kind=ntype)
         return [built] if built is not None else []
 
     if ntype == "table":
