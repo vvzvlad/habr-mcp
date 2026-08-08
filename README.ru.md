@@ -43,7 +43,7 @@ make run       # запустить HTTP MCP-сервер
 ## Деплой
 
 Деплойте готовый образ — не собирайте на проде. `docker-compose.yml` тянет
-`ghcr.io/vvzvlad/habr-mcp:latest`, монтирует именованный том в `/app/data`
+`gitea.vvzvlad.xyz/projects/habr-mcp:latest`, монтирует именованный том в `/app/data`
 (зашифрованное хранилище учётных данных), задаёт `HABR_MCP_HOST=0.0.0.0`, чтобы
 контейнер слушал все интерфейсы, и публикует порт MCP (8765) через Traefik.
 MCP-клиенты подключаются к `https://<host>/mcp`. watchtower автоматически обновляет

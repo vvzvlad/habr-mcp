@@ -1,4 +1,4 @@
-# Deploy template. Pull the prebuilt image from ghcr.io — do NOT build on prod.
+# Deploy template. Pull the prebuilt image from the Gitea registry — do NOT build on prod.
 #
 # This is the WEB-SERVICE variant: the MCP server binds an inbound HTTP port and
 # is published via Traefik. MCP clients connect to https://<host>/mcp.
@@ -14,7 +14,7 @@ networks:
 
 services:
   habr-mcp:
-    image: ghcr.io/vvzvlad/habr-mcp:latest
+    image: gitea.vvzvlad.xyz/projects/habr-mcp:latest
     container_name: habr-mcp
     restart: always
     volumes:

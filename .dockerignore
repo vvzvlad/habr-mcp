@@ -6,7 +6,7 @@ __pycache__/
 .env
 data/
 tests/
-.github/
+.gitea/
 *.md
 .DS_Store
 *.har

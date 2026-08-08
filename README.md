@@ -41,7 +41,7 @@ be filled in.
 ## Deploy
 
 Deploy the prebuilt image — do not build on prod. `docker-compose.yml` pulls
-`ghcr.io/vvzvlad/habr-mcp:latest`, mounts a named volume on `/app/data` (the
+`gitea.vvzvlad.xyz/projects/habr-mcp:latest`, mounts a named volume on `/app/data` (the
 encrypted credential store), sets `HABR_MCP_HOST=0.0.0.0` so the container binds
 all interfaces, and publishes the MCP port (8765) via Traefik. MCP clients then
 connect to `https://<host>/mcp`. watchtower auto-updates the container on a new

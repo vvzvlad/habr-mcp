@@ -1,0 +1,38 @@
+name: Tests
+
+# Split out from image-check-publish.yml on purpose: that workflow must never
+# run on pull_request, because a PR build would push :latest and watchtower
+# would deploy it. Tests alone are safe here and are what a PR actually needs —
+# without this workflow a broken test only surfaces after the merge into main.
+on:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read   # checkout
+
+# Unlike the image workflow, cancelling is right here: this job produces no
+# artifacts, so a superseded test run is just wasted runner time.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: pip install -r requirements-dev.txt
+
+    # No `env:` here: every field of `Settings` has a default, so importing
+    # src.settings succeeds in a bare environment and the suite needs no secrets.
+    # pytest.ini already pins testpaths/pythonpath/asyncio_mode.
+    - name: Run tests
+      run: pytest --tb=short -q
