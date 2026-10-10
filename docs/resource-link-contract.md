@@ -132,8 +132,9 @@ A *fetch failure* is any of: a network error, a non-2xx status, a malformed
 
 - **Body** link fetch fails → the tool returns a Russian error string; no draft is
   created or updated.
-- **Image** link fetch fails → that image is skipped with a warning; publishing
-  continues (the body still goes through).
+- **Image** link fetch (or its habrastorage upload) fails → the tool returns a
+  Russian error listing every such image with the failure reason; no draft is
+  created or updated.
 
 ## 6. What the producer (Docmost side) must implement
 

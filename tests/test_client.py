@@ -1282,7 +1282,8 @@ async def test_reupload_data_uri_jpeg_uses_jpg_filename(author_settings):
 
 @respx.mock
 async def test_reupload_fetch_failure_skips_with_warning(author_settings):
-    # A failing fetch must NOT abort publishing: skip with a warning.
+    # A failing fetch must not raise from _reupload_images: the src stays unmapped and
+    # a warning carries the reason (the caller then refuses the save).
     image_url = "https://cdn.example.com/img/broken.png"
     respx.get(image_url).mock(return_value=httpx.Response(404))
     client = HabrClient(author_settings)
@@ -1509,80 +1510,122 @@ async def test_upload_image_nested_data_url(author_settings):
 
 
 @respx.mock
-async def test_upload_image_regex_fallback_in_json_text(author_settings):
-    # A JSON body with no usable url falls back to the habrastorage regex over
-    # the raw response text (which still contains the URL).
-    # The regex captures \S+ greedily, so the URL must end at a whitespace
-    # boundary; JSON serializes the value as "<url>", whose closing quote is the
-    # next char. Append a space inside the value so the match stops cleanly.
+async def test_upload_image_url_only_in_unknown_json_key_raises(author_settings):
+    # A JSON body whose habrastorage URL sits under an unknown key (not url/src/
+    # data.url) is NOT a successful upload: the body is never regex-scanned.
     url = "https://habrastorage.org/getpro/habr/regex-json"
     respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, json={"ok": True, "location": f"{url} "})
     )
     client = HabrClient(author_settings)
     try:
-        result = await client.upload_image(b"img", "image.png", "image/png")
+        with pytest.raises(HabrApiError) as exc:
+            await client.upload_image(b"img", "image.png", "image/png")
     finally:
         await client.aclose()
-    assert result == url
+    assert "не вернул URL" in str(exc.value)
+    assert "image.png" in str(exc.value)
 
 
 @respx.mock
-async def test_upload_image_regex_fallback_non_json_body(author_settings):
-    # A non-JSON (HTML) body containing a habrastorage URL is matched by regex.
-    # The regex captures \S+ greedily, so the URL must be whitespace-delimited.
+async def test_upload_image_non_json_body_with_url_raises(author_settings):
+    # A non-JSON (HTML) 2xx body containing a habrastorage URL is a failure.
     url = "https://habrastorage.org/getpro/habr/regex-html"
     respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, text=f"uploaded to {url} done")
     )
     client = HabrClient(author_settings)
     try:
-        result = await client.upload_image(b"img", "image.png", "image/png")
+        with pytest.raises(HabrApiError) as exc:
+            await client.upload_image(b"img", "image.png", "image/png")
     finally:
         await client.aclose()
-    assert result == url
+    assert "не-JSON" in str(exc.value)
 
 
 @respx.mock
-async def test_upload_image_non_json_no_match_returns_none(author_settings):
-    # A non-JSON body with no habrastorage URL yields None (clean failure).
+async def test_upload_image_non_json_no_url_raises(author_settings):
+    # A non-JSON body with no habrastorage URL is a failure too.
     respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, text="<html>no link here</html>")
     )
     client = HabrClient(author_settings)
     try:
-        result = await client.upload_image(b"img", "image.png", "image/png")
+        with pytest.raises(HabrApiError) as exc:
+            await client.upload_image(b"img", "image.png", "image/png")
     finally:
         await client.aclose()
-    assert result is None
+    assert "не-JSON" in str(exc.value)
 
 
 @respx.mock
-async def test_upload_image_transport_error_returns_none(author_settings):
-    # Transport errors are swallowed (publish must not abort): returns None.
+async def test_upload_image_transport_error_raises(author_settings):
+    # A transport error is reported as HabrApiError with the cause, never None.
     respx.post(f"{BASE_URL}publication/upload").mock(
         side_effect=httpx.ConnectError("boom")
     )
     client = HabrClient(author_settings)
     try:
-        result = await client.upload_image(b"img", "image.png", "image/png")
+        with pytest.raises(HabrApiError) as exc:
+            await client.upload_image(b"img", "image.png", "image/png")
     finally:
         await client.aclose()
-    assert result is None
+    message = str(exc.value)
+    assert "сетевая ошибка" in message
+    assert "boom" in message
+    assert "image.png" in message
 
 
 @respx.mock
-async def test_upload_image_dict_no_url_no_match_returns_none(author_settings):
-    # A dict body with no url AND raw text with no habrastorage match -> None.
+async def test_upload_image_dict_no_url_raises(author_settings):
+    # A JSON dict without url/src/data.url is a failure.
     respx.post(f"{BASE_URL}publication/upload").mock(
         return_value=httpx.Response(200, json={"ok": True})
     )
     client = HabrClient(author_settings)
     try:
-        result = await client.upload_image(b"img", "image.png", "image/png")
+        with pytest.raises(HabrApiError) as exc:
+            await client.upload_image(b"img", "image.png", "image/png")
     finally:
         await client.aclose()
-    assert result is None
+    assert "не вернул URL" in str(exc.value)
+
+
+@respx.mock
+async def test_upload_image_error_page_with_habrastorage_url_raises(author_settings):
+    # A 502 HTML error page that happens to contain a habrastorage.org URL must
+    # never be read as a successful upload.
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(
+            502, text="<html>Bad gateway, see https://habrastorage.org/status</html>"
+        )
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    message = str(exc.value)
+    assert "HTTP 502" in message
+    assert "image.png" in message
+
+
+@respx.mock
+async def test_upload_image_non_2xx_with_json_url_raises(author_settings):
+    # A non-2xx status is a failure even when the JSON body carries a url.
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(
+            500, json={"url": "https://habrastorage.org/getpro/habr/x.png"}
+        )
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.upload_image(b"img", "image.png", "image/png")
+    finally:
+        await client.aclose()
+    assert "HTTP 500" in str(exc.value)
 
 
 # -- _upload_filename: content-type -> extension -----------------------------
@@ -1641,9 +1684,9 @@ def test_validate_announce_length_at_max_ok():
 
 @respx.mock
 async def test_reupload_upload_failed_warns(author_settings):
-    # The image fetch succeeds but the upload returns no usable url and no regex
-    # match: the mapping stays empty and an "image upload failed" warning is added
-    # (distinct from the fetch-failure path).
+    # The image fetch succeeds but the upload returns no usable url (upload_image
+    # raises): the mapping stays empty and an "image upload failed" warning is
+    # added (distinct from the fetch-failure path).
     image_url = "https://cdn.example.com/img/upfail.png"
     respx.get(image_url).mock(
         return_value=httpx.Response(
@@ -1663,6 +1706,120 @@ async def test_reupload_upload_failed_warns(author_settings):
     assert warnings and any(
         "image upload failed" in w and image_url in w for w in warnings
     )
+
+
+# -- content loss refuses the save -------------------------------------------
+
+
+@respx.mock
+async def test_create_draft_refuses_when_image_upload_fails(author_settings):
+    # A non-2xx upload must refuse the draft (naming the image and the cause)
+    # instead of saving an article with the image silently removed.
+    image_url = "https://cdn.example.com/img/lost.png"
+    respx.get(image_url).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(500, text="Internal Server Error")
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t",
+                _image_doc(image_url),
+                hubs=["1"],
+                tags=["t1"],
+                flow="2",
+                announce="А" * 120,
+            )
+    finally:
+        await client.aclose()
+    message = str(exc.value)
+    assert "НЕ сохранён" in message
+    assert f"- image: {image_url}" in message
+    assert "image upload failed" in message
+    assert "HTTP 500" in message
+    assert save_route.called is False
+
+
+@respx.mock
+async def test_create_draft_refuses_diagrams_and_unsupported_block(author_settings):
+    # drawio with a Docmost-relative src (unfetchable), drawio without src and an
+    # unsupported content block (video) must refuse the draft with a per-node
+    # report and the stashPage hint; a pageBreak is harmless and not reported.
+    drawio_src = "/api/files/abc/d.drawio.svg"
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Текст"}]},
+            {"type": "drawio", "attrs": {"src": drawio_src}},
+            {"type": "drawio", "attrs": {}},
+            {"type": "video", "attrs": {"src": "/api/files/v/clip.mp4"}},
+            {"type": "pageBreak"},
+        ],
+    }
+    upload_route = respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(200, json={"url": "https://habrastorage.org/x"})
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save").mock(
+        return_value=httpx.Response(200, json={"post": "1", "ok": True})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.create_draft(
+                "t", doc, hubs=["1"], tags=["t1"], flow="2", announce="А" * 120
+            )
+    finally:
+        await client.aclose()
+    message = str(exc.value)
+    assert f"- drawio: {drawio_src}" in message
+    assert "- drawio: нет src" in message
+    assert "video ×1" in message
+    assert "/api/files/v/clip.mp4" in message
+    assert "image fetch failed" in message
+    assert "stashPage" in message
+    assert "pageBreak" not in message
+    assert upload_route.called is False
+    assert save_route.called is False
+
+
+@respx.mock
+async def test_update_draft_refuses_when_image_upload_fails(
+    author_settings, post_data_payload
+):
+    # A new body whose image fails to upload must not overwrite the draft.
+    image_url = "https://cdn.example.com/img/lost.png"
+    respx.get(f"{BASE_URL}publication/post-data/42").mock(
+        return_value=httpx.Response(200, json=post_data_payload)
+    )
+    respx.get(image_url).mock(
+        return_value=httpx.Response(
+            200, content=b"img", headers={"content-type": "image/png"}
+        )
+    )
+    respx.post(f"{BASE_URL}publication/upload").mock(
+        return_value=httpx.Response(502, text="Bad gateway")
+    )
+    save_route = respx.post(f"{BASE_URL}publication/save/42").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client = HabrClient(author_settings)
+    try:
+        with pytest.raises(HabrApiError) as exc:
+            await client.update_draft(42, docmost_doc=_image_doc(image_url))
+    finally:
+        await client.aclose()
+    message = str(exc.value)
+    assert "НЕ сохранён" in message
+    assert image_url in message
+    assert save_route.called is False
 
 
 @respx.mock
