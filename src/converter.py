@@ -28,6 +28,10 @@ Design notes:
   inputs degrade gracefully and (optionally) record a human-readable warning.
 - Warnings are appended to the caller-provided ``warnings`` list. Some warnings
   are de-duplicated ("once" warnings) so a long document does not spam them.
+- Blocking content losses (an image/diagram without a habrastorage URL, an
+  unknown block atom not in ``_HARMLESS_BLOCK_ATOMS``) are additionally appended
+  to the optional ``losses`` list as ``(node_type, src_key)``. The converter
+  never raises on a loss; the caller decides whether a loss aborts the save.
 """
 
 from __future__ import annotations
@@ -171,6 +175,19 @@ def _warn_once(warnings: list[str] | None, seen: set[str], message: str) -> None
         return
     seen.add(message)
     warnings.append(message)
+
+
+def _record_loss(
+    losses: list[tuple[str, str | None]] | None, ntype: str, src: Any
+) -> None:
+    """Append ``(ntype, image_src_key(src))`` to ``losses`` (no-op if None).
+
+    A loss is content that would silently vanish from the Habr article (an
+    image/diagram with no habrastorage URL, an unknown block atom); the caller
+    uses the list to refuse the save.
+    """
+    if losses is not None:
+        losses.append((ntype, image_src_key(src)))
 
 
 # --- Public API: image collection -------------------------------------------
@@ -683,6 +700,10 @@ _WRAPPER_RENAME = {
     "taskItem": "listitem",
 }
 
+# Unknown block atoms without visible content: dropped with a warning like any
+# unknown atom, but NOT recorded as a content loss (they never block a save).
+_HARMLESS_BLOCK_ATOMS = {"pageBreak"}
+
 # Habr block types confirmed safe inside a listitem. Anything else (code_block,
 # image, blockquote, spoiler, …) is kept but flagged, since the list zone may
 # reject non-paragraph/non-list children. Nested lists carry attrs.type "inner".
@@ -699,6 +720,8 @@ def _convert_blocks(
     seen: set[str],
     nested_list: bool = False,
     heading_min_level: int = 1,
+    *,
+    losses: list[tuple[str, str | None]] | None = None,
 ) -> list[dict]:
     """Convert a list of Docmost block nodes into a flat list of Habr blocks.
 
@@ -708,6 +731,7 @@ def _convert_blocks(
     list item is tagged ``attrs.type:"inner"`` instead of ``"outer"``.
     ``heading_min_level`` is the doc-wide heading baseline threaded down so every
     heading (at any nesting depth) normalizes against the same value.
+    ``losses`` collects blocking content losses (see ``_record_loss``).
     """
     result: list[dict] = []
     if not isinstance(children, list):
@@ -717,7 +741,13 @@ def _convert_blocks(
             continue
         result.extend(
             _convert_block(
-                child, image_url_map, warnings, seen, nested_list, heading_min_level
+                child,
+                image_url_map,
+                warnings,
+                seen,
+                nested_list,
+                heading_min_level,
+                losses=losses,
             )
         )
     return result
@@ -730,6 +760,8 @@ def _convert_block(
     seen: set[str],
     nested_list: bool = False,
     heading_min_level: int = 1,
+    *,
+    losses: list[tuple[str, str | None]] | None = None,
 ) -> list[dict]:
     """Convert a single Docmost block node into zero or more Habr blocks.
 
@@ -737,7 +769,9 @@ def _convert_block(
     wrapper) or to none (e.g. a dropped atom or an unmapped image).
     ``nested_list`` controls the list ``attrs.type`` (inner vs outer).
     ``heading_min_level`` is the doc-wide heading baseline used to normalize
-    heading levels regardless of nesting depth.
+    heading levels regardless of nesting depth. An unmapped image/diagram and
+    an unknown block atom (outside ``_HARMLESS_BLOCK_ATOMS``) are recorded in
+    ``losses``.
     """
     ntype = node.get("type")
 
@@ -766,6 +800,7 @@ def _convert_block(
             seen,
             nested_list=True if is_list_item else nested_list,
             heading_min_level=heading_min_level,
+            losses=losses,
         )
         if is_list_item:
             # Block content other than paragraphs and nested lists may be
@@ -800,23 +835,32 @@ def _convert_block(
             warnings,
             seen,
             heading_min_level=heading_min_level,
+            losses=losses,
         )
         return [_build_spoiler(title, inner)]
 
     if ntype == "details":
         return [
-            _convert_details(node, image_url_map, warnings, seen, heading_min_level)
+            _convert_details(
+                node, image_url_map, warnings, seen, heading_min_level, losses=losses
+            )
         ]
 
     if ntype == "image":
         built = _build_image(node, image_url_map, warnings)
-        return [built] if built is not None else []
+        if built is None:
+            _record_loss(losses, "image", (node.get("attrs") or {}).get("src"))
+            return []
+        return [built]
 
     if ntype in ("drawio", "excalidraw"):
         # A diagram node carries its rendered raster in attrs.src, exactly like
         # an image, so it converts to a Habr image via the same builder.
         built = _build_image(node, image_url_map, warnings, kind=ntype)
-        return [built] if built is not None else []
+        if built is None:
+            _record_loss(losses, ntype, (node.get("attrs") or {}).get("src"))
+            return []
+        return [built]
 
     if ntype == "table":
         return _build_table(node, warnings, seen)
@@ -850,14 +894,27 @@ def _convert_block(
 
     # Fallback for ANY other block (columns, video, ...): if it has block
     # children, flatten them into the parent stream so we never silently lose
-    # nested content; if it is an atom, drop it. Both record a warning.
+    # nested content; if it is an atom, drop it. Both record a warning. A
+    # dropped atom is also a content loss unless it is known to be harmless.
     children = node.get("content")
     if isinstance(children, list) and children:
         _warn(warnings, f"unsupported block flattened: {ntype}")
         return _convert_blocks(
-            children, image_url_map, warnings, seen, nested_list, heading_min_level
+            children,
+            image_url_map,
+            warnings,
+            seen,
+            nested_list,
+            heading_min_level,
+            losses=losses,
         )
     _warn(warnings, f"unsupported block dropped: {ntype}")
+    if ntype not in _HARMLESS_BLOCK_ATOMS:
+        # Unknown nodes may carry any attrs shape; the converter must stay total.
+        attrs = node.get("attrs")
+        _record_loss(
+            losses, ntype, attrs.get("src") if isinstance(attrs, dict) else None
+        )
     return []
 
 
@@ -867,12 +924,15 @@ def _convert_details(
     warnings: list[str] | None,
     seen: set[str],
     heading_min_level: int = 1,
+    *,
+    losses: list[tuple[str, str | None]] | None = None,
 ) -> dict:
     """Convert a Docmost ``details`` node into a Habr ``spoiler``.
 
     Title comes from the ``detailsSummary`` child's text; content comes from the
     converted block children of the ``detailsContent`` child. ``heading_min_level``
-    is threaded so headings inside the spoiler normalize against the doc baseline.
+    is threaded so headings inside the spoiler normalize against the doc baseline;
+    ``losses`` collects blocking content losses from the spoiler body.
     """
     summary_text = ""
     content_children: list[dict] = []
@@ -889,6 +949,7 @@ def _convert_details(
                 warnings,
                 seen,
                 heading_min_level=heading_min_level,
+                losses=losses,
             )
     title = summary_text.strip() or "Спойлер"
     return _build_spoiler(title, content_children)
@@ -1180,14 +1241,20 @@ def docmost_to_habr_doc(
     docmost_doc: dict,
     image_url_map: dict[str, str] | None = None,
     warnings: list[str] | None = None,
+    losses: list[tuple[str, str | None]] | None = None,
 ) -> dict:
     """Translate a Docmost (TipTap) ProseMirror doc into a Habr editorVersion-2 doc.
 
     Returns ``{"type":"doc","content":[...]}``. Never emits a non-Habr node/mark
-    type. Unknown nodes/marks degrade gracefully and append a human-readable
-    string to ``warnings`` (when a list is provided). ``image`` nodes get their
-    ``src`` replaced via ``image_url_map``; an image whose src is not in the map
-    is dropped with a warning.
+    type and never raises on lost or unknown content (only ``ValueError`` for an
+    input that is not a ProseMirror doc). Unknown nodes/marks degrade gracefully
+    and append a human-readable string to ``warnings`` (when a list is provided).
+    ``image`` nodes get their ``src`` replaced via ``image_url_map``; an image
+    whose src is not in the map is dropped with a warning. Blocking content
+    losses (an unmapped image/drawio/excalidraw, an unknown block atom that is
+    not in ``_HARMLESS_BLOCK_ATOMS``) are also appended to ``losses`` (when a
+    list is provided) as ``(node_type, src_key)`` so the caller can refuse the
+    save.
     """
     doc = _as_doc(docmost_doc)
     seen: set[str] = set()
@@ -1202,6 +1269,7 @@ def docmost_to_habr_doc(
         warnings,
         seen,
         heading_min_level=heading_min_level,
+        losses=losses,
     )
     return {"type": "doc", "content": content}
 

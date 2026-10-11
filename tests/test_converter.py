@@ -837,31 +837,61 @@ def test_image_caption_text_is_verbatim():
     ]
 
 
-def test_image_not_in_map_dropped_with_warning():
+def test_image_not_in_map_recorded_as_loss():
     src = _doc({"type": "image", "attrs": {"src": "orig://missing"}})
     warnings: list[str] = []
-    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings)
+    losses: list = []
+    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings, losses=losses)
     assert out["content"] == []
     assert any("image dropped (no habrastorage url): orig://missing" in w for w in warnings)
+    assert losses == [("image", "orig://missing")]
 
 
-def test_image_none_map_dropped():
+def test_image_none_map_recorded_as_loss():
     src = _doc({"type": "image", "attrs": {"src": "orig://x"}})
-    out = docmost_to_habr_doc(src, image_url_map=None)
+    losses: list = []
+    out = docmost_to_habr_doc(src, image_url_map=None, losses=losses)
     assert out["content"] == []
+    assert losses == [("image", "orig://x")]
 
 
 # --- unknown blocks ----------------------------------------------------------
 
 
-def test_unknown_block_atom_dropped_with_warning():
-    # A genuinely-unknown childless atom hits the fallback drop branch.
-    # (drawio/excalidraw are NO LONGER unknown — they convert to images.)
+def test_unknown_block_atom_recorded_as_loss():
+    # A genuinely-unknown childless atom hits the fallback drop branch and is a
+    # blocking loss. (drawio/excalidraw are NO LONGER unknown — they convert to
+    # images.)
     src = _doc({"type": "someUnknownAtom", "attrs": {"id": "1"}})
     warnings: list[str] = []
-    out = docmost_to_habr_doc(src, warnings=warnings)
+    losses: list = []
+    out = docmost_to_habr_doc(src, warnings=warnings, losses=losses)
     assert out["content"] == []
     assert any("unsupported block dropped: someUnknownAtom" in w for w in warnings)
+    assert losses == [("someUnknownAtom", None)]
+
+
+def test_page_break_dropped_but_not_a_loss():
+    # pageBreak has no visible content: dropped with a warning, never a loss.
+    src = _doc({"type": "pageBreak"})
+    warnings: list[str] = []
+    losses: list = []
+    out = docmost_to_habr_doc(src, warnings=warnings, losses=losses)
+    assert out["content"] == []
+    assert any("unsupported block dropped: pageBreak" in w for w in warnings)
+    assert losses == []
+
+
+def test_unknown_inline_atom_not_a_loss():
+    # Unknown inline junk stays a warning only; it never blocks a save.
+    src = _doc(
+        {"type": "paragraph", "content": [_text("a"), {"type": "weirdInline"}]}
+    )
+    warnings: list[str] = []
+    losses: list = []
+    docmost_to_habr_doc(src, warnings=warnings, losses=losses)
+    assert any("unsupported inline dropped: weirdInline" in w for w in warnings)
+    assert losses == []
 
 
 # --- diagrams (drawio / excalidraw) ------------------------------------------
@@ -887,12 +917,14 @@ def test_drawio_present_in_map_emitted_as_image():
     assert img["content"] == [{"type": "image_caption"}]
 
 
-def test_drawio_not_in_map_dropped_with_warning():
+def test_drawio_not_in_map_recorded_as_loss():
     src = _doc({"type": "drawio", "attrs": {"src": "orig://missing"}})
     warnings: list[str] = []
-    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings)
+    losses: list = []
+    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings, losses=losses)
     assert out["content"] == []
     assert any("drawio dropped (no habrastorage url): orig://missing" in w for w in warnings)
+    assert losses == [("drawio", "orig://missing")]
 
 
 def test_excalidraw_present_in_map_emitted_as_image():
@@ -905,21 +937,30 @@ def test_excalidraw_present_in_map_emitted_as_image():
     assert img["content"] == [{"type": "image_caption"}]
 
 
-def test_excalidraw_not_in_map_dropped_with_warning():
+def test_excalidraw_not_in_map_recorded_as_loss():
     src = _doc({"type": "excalidraw", "attrs": {"src": "orig://gone"}})
     warnings: list[str] = []
-    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings)
+    losses: list = []
+    out = docmost_to_habr_doc(src, image_url_map={}, warnings=warnings, losses=losses)
     assert out["content"] == []
     assert any("excalidraw dropped (no habrastorage url): orig://gone" in w for w in warnings)
+    assert losses == [("excalidraw", "orig://gone")]
 
 
-def test_drawio_missing_src_dropped_with_warning():
-    # A never-drawn diagram has no src at all -> dropped like an unmapped image.
+def test_drawio_missing_src_recorded_as_loss():
+    # A never-drawn diagram has no src at all -> a loss like an unmapped image.
     src = _doc({"type": "drawio", "attrs": {}})
     warnings: list[str] = []
-    out = docmost_to_habr_doc(src, image_url_map={"orig://x": "https://h/x.png"}, warnings=warnings)
+    losses: list = []
+    out = docmost_to_habr_doc(
+        src,
+        image_url_map={"orig://x": "https://h/x.png"},
+        warnings=warnings,
+        losses=losses,
+    )
     assert out["content"] == []
     assert any("drawio dropped (no habrastorage url): None" in w for w in warnings)
+    assert losses == [("drawio", None)]
 
 
 def test_drawio_resource_link_src_rewritten_via_map():

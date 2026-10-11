@@ -49,9 +49,12 @@ and then reuse the same pipeline. Each image `attrs.src` may be a plain `http(s)
 URL, a `data:` URI, or an MCP `resource_link`; habr resolves it to bytes via
 `HabrClient.fetch_resource` (HTTP GET with **no** Authorization header, or a
 local `data:` decode) and re-uploads them to habrastorage. There is no Docmost
-token — the producer hands habr a fetchable URL / data-URI / resource_link. An
-image failure does not abort publication (text goes through, unresolved images
-are dropped with a warning).
+token — the producer hands habr a fetchable URL / data-URI / resource_link.
+Content loss aborts the save: if any image/drawio/excalidraw ends up without a
+habrastorage URL (fetch or upload failed, no `src`) or the body has an
+unsupported block atom (anything but the harmless `pageBreak`), no draft is
+created or updated and the tool returns a Russian error listing each lost node
+(type, src, count), the failure reasons and what to do.
 
 ## Setup
 All routine actions go through the `Makefile` — run `make help` to list targets.

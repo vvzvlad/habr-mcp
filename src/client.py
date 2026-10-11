@@ -17,6 +17,7 @@ import ipaddress
 import re
 import secrets
 import socket
+from collections import Counter
 from os.path import splitext
 from urllib.parse import unquote_to_bytes, urlsplit
 from typing import Any
@@ -50,9 +51,6 @@ _EDITABLE_DRAFT_STATUSES = {"drafted", "draft"}
 
 # nanoid alphabet (URL-safe), used for the create-draft idempotenceKey.
 _NANOID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
-
-# Matches a habrastorage URL anywhere in the upload response body (fallback).
-_HABRASTORAGE_RE = re.compile(r"https://habrastorage\.org/\S+")
 
 # The csrf token Habr embeds in the feed page lives in a meta tag. Tolerate
 # single or double quotes and intermediate attributes (e.g. an `id=…` between
@@ -273,6 +271,58 @@ def _validate_announce_length(text: str) -> None:
             "Анонс (announce) слишком длинный (более 3000 символов) — "
             "это отдельное поле «до ката», сократите текст-тизер."
         )
+
+
+# Loss node types that are rendered as Habr images (their raster lives in src).
+_IMAGE_LOSS_TYPES = ("image", "drawio", "excalidraw")
+
+
+def _content_loss_message(
+    losses: list[tuple[str, str | None]], reasons: list[str]
+) -> str:
+    """Build the Russian refusal text for a save blocked by content losses.
+
+    ``losses`` are the converter's ``(node_type, src_key)`` entries; ``reasons``
+    are the image fetch/upload warnings explaining why an image has no
+    habrastorage URL. Lists every lost image/diagram by src (de-duplicated with
+    a count), counts unsupported blocks by type, and says what to do.
+    """
+    images = Counter(loss for loss in losses if loss[0] in _IMAGE_LOSS_TYPES)
+    blocks = [loss for loss in losses if loss[0] not in _IMAGE_LOSS_TYPES]
+
+    def _item(ntype: str, src: str | None, count: int = 1) -> str:
+        suffix = f" ×{count}" if count > 1 else ""
+        return f"- {ntype}: {src or 'нет src'}{suffix}"
+
+    lines = ["Черновик НЕ сохранён: часть содержимого не попала бы в статью Habr."]
+    if images:
+        lines.append(
+            "Картинки и диаграммы без адреса на habrastorage (не скачались, "
+            "не залились или нет src):"
+        )
+        lines.extend(_item(ntype, src, n) for (ntype, src), n in images.items())
+    if blocks:
+        counts = Counter(ntype for ntype, _ in blocks)
+        summary = ", ".join(f"{ntype} ×{n}" for ntype, n in counts.items())
+        lines.append(f"Неподдерживаемые блоки с содержимым: {summary}")
+        lines.extend(_item(ntype, src) for ntype, src in blocks if src)
+    if reasons:
+        lines.append("Причины:")
+        lines.extend(f"- {reason}" for reason in reasons)
+    lines.append("Что делать:")
+    if blocks or any(ntype in ("drawio", "excalidraw") for ntype, _ in images):
+        lines.append(
+            "- Диаграмму нужно отдать как растровую картинку: открой её в "
+            "редакторе вики и сохрани, либо публикуй через stashPage."
+        )
+    if blocks:
+        lines.append("- Неподдерживаемый блок уберите или замените.")
+    if images:
+        lines.append(
+            "- Картинке нужен публичный http(s)-URL, data: URI или "
+            "resource_link; если отказал habrastorage — повторите попытку."
+        )
+    return "\n".join(lines)
 
 
 def _cookie_interface_lang(cookie: str) -> str:
@@ -546,6 +596,9 @@ class HabrClient:
 
         Images are reuploaded to habrastorage first; the text is then converted
         to Habr's editorVersion-2 tree. Returns ``{"response", "warnings"}``.
+        If any content would be lost (an image/diagram without a habrastorage
+        URL, an unsupported block atom) nothing is saved and ``HabrApiError``
+        lists the losses.
 
         Validates the fields Habr requires on create (hubs/tags/flow non-empty,
         announce 100..3000 chars) locally and raises ``HabrApiError`` with a
@@ -577,7 +630,13 @@ class HabrClient:
             _validate_announce_length(announce)
 
         image_map, warnings = await self._reupload_images(docmost_doc)
-        habr_doc = docmost_to_habr_doc(docmost_doc, image_map, warnings)
+        reasons = list(warnings)
+        losses: list[tuple[str, str | None]] = []
+        habr_doc = docmost_to_habr_doc(docmost_doc, image_map, warnings, losses)
+        # Refuse the save (before publication/save) rather than silently publish
+        # an article with missing images/diagrams/blocks.
+        if losses:
+            raise HabrApiError(_content_loss_message(losses, reasons))
         source = serialize_source(habr_doc)
         if preview_doc:
             preview = serialize_source(preview_doc)
@@ -715,7 +774,9 @@ class HabrClient:
 
         Coerces the write-side types Habr expects (``hubs`` -> list[str],
         ``text``/``preview`` editorVersion -> int 2) since ``post-data`` returns
-        them as ints/strings. Returns ``{"response", "warnings"}``.
+        them as ints/strings. Returns ``{"response", "warnings"}``. A new body
+        that would lose content is refused before the save, as in
+        ``create_draft``.
         """
         data = await self.get_draft(post_id)
         form = dict(data.get("postForm") or data)
@@ -749,7 +810,12 @@ class HabrClient:
         # separate field: changing the body alone never touches the preview.
         if docmost_doc is not None:
             image_map, warnings = await self._reupload_images(docmost_doc)
-            habr_doc = docmost_to_habr_doc(docmost_doc, image_map, warnings)
+            reasons = list(warnings)
+            losses: list[tuple[str, str | None]] = []
+            habr_doc = docmost_to_habr_doc(docmost_doc, image_map, warnings, losses)
+            # Refuse before publication/save/<id>, same as create_draft.
+            if losses:
+                raise HabrApiError(_content_loss_message(losses, reasons))
             form["text"] = {
                 "source": serialize_source(habr_doc),
                 "editorVersion": 2,
@@ -877,13 +943,14 @@ class HabrClient:
 
     async def upload_image(
         self, image_bytes: bytes, filename: str, content_type: str
-    ) -> str | None:
+    ) -> str:
         """Upload one image to habrastorage via ``publication/upload``.
 
-        EXPERIMENTAL (protocol §6.3): the multipart field name and exact response
-        keys were not captured, so we try several response shapes and fall back to
-        a regex over the raw body. Returns the habrastorage URL or ``None`` on any
-        failure (network errors are swallowed so a publish is not aborted).
+        Returns the habrastorage URL taken from the JSON response (``url``, then
+        ``src``, then ``data.url``; protocol §6.3). Raises ``HabrApiError``
+        (Russian message) on a transport error, a non-2xx status, a non-JSON
+        body, or a JSON body without a non-empty URL string — an error page is
+        never read as a successful upload.
         """
         # Author headers minus Content-Type so httpx sets the multipart boundary.
         headers = {
@@ -897,20 +964,35 @@ class HabrClient:
                 files={"file": (filename, image_bytes, content_type)},
                 headers=headers,
             )
-        except httpx.HTTPError:
-            return None
+        except httpx.HTTPError as exc:
+            raise HabrApiError(
+                f"Не удалось залить картинку {filename} в habrastorage: "
+                f"сетевая ошибка ({exc})"
+            ) from exc
+        snippet = response.text.strip().replace("\n", " ")[:200]
+        if not response.is_success:
+            raise HabrApiError(
+                f"habrastorage отклонил картинку {filename}: "
+                f"HTTP {response.status_code} {snippet}"
+            )
         try:
             data = response.json()
-        except ValueError:
-            data = None
+        except ValueError as exc:
+            raise HabrApiError(
+                f"habrastorage вернул не-JSON ответ на заливку картинки {filename} "
+                f"(HTTP {response.status_code}): {snippet}"
+            ) from exc
+        url = None
         if isinstance(data, dict):
             url = data.get("url") or data.get("src")
             if not url and isinstance(data.get("data"), dict):
                 url = data["data"].get("url")
-            if isinstance(url, str) and url:
-                return url
-        match = _HABRASTORAGE_RE.search(response.text or "")
-        return match.group(0) if match else None
+        if not isinstance(url, str) or not url:
+            raise HabrApiError(
+                f"habrastorage не вернул URL картинки {filename} "
+                f"(HTTP {response.status_code}): {snippet}"
+            )
+        return url
 
     async def fetch_resource(
         self, uri: str, *, client: httpx.AsyncClient | None = None
@@ -970,8 +1052,8 @@ class HabrClient:
             response.raise_for_status()
         # A malformed src raises httpx.InvalidURL (not an HTTPError) or, for a bad
         # IDNA host, idna.IDNAError (a ValueError subclass). Wrap all of these so
-        # one bad image can never abort publishing and the doc path gets a clean
-        # Russian error instead of an unhandled exception.
+        # one bad image is reported (not crashing the image batch) and the doc
+        # path gets a clean Russian error instead of an unhandled exception.
         except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             raise HabrApiError(f"Не удалось загрузить ресурс {uri}: {exc}") from exc
         finally:
@@ -999,8 +1081,10 @@ class HabrClient:
         """Fetch every image source and reupload it to habrastorage.
 
         Returns ``(image_src_key -> habrastorage_url, warnings)``. Never raises:
-        image problems must not abort publishing (the text still goes through and
-        the converter drops images that have no mapped URL). Each ``attrs.src``
+        a failed fetch/upload only leaves the src unmapped and adds a warning
+        (the reason). The converter records each unmapped image as a content loss
+        and the caller (``create_draft``/``update_draft``) decides whether to
+        refuse the save. Each ``attrs.src``
         may be a plain http(s) URL string, a ``data:`` URI string, or an MCP
         ``resource_link`` dict; all are resolved through ``fetch_resource`` with
         NO credentials. Sandbox source links are ephemeral (~1h TTL).
@@ -1020,26 +1104,27 @@ class HabrClient:
 
         async def process(src: Any, shared_client: httpx.AsyncClient) -> None:
             # Bounded fetch+upload for one image. Handles its own errors and
-            # always returns so ``gather`` never raises and one bad image can
-            # never abort publishing.
+            # always returns so ``gather`` never raises and the other images
+            # are still processed; the failure reason lands in ``warnings``.
             uri = resource_link_uri(src) or src
             async with sem:
                 try:
                     data, fetched_ct = await self.fetch_resource(
                         uri, client=shared_client
                     )
+                except HabrApiError as exc:
+                    warnings.append(f"image fetch failed: {uri} ({exc})")
+                    return
+                try:
                     new_url = await self.upload_image(
                         data,
                         _upload_filename(uri, fetched_ct),
                         fetched_ct or "application/octet-stream",
                     )
                 except HabrApiError as exc:
-                    warnings.append(f"image fetch failed: {uri} ({exc})")
+                    warnings.append(f"image upload failed: {uri} ({exc})")
                     return
-            if new_url:
-                mapping[image_src_key(src)] = new_url
-            else:
-                warnings.append(f"image upload failed: {uri}")
+            mapping[image_src_key(src)] = new_url
 
         async with httpx.AsyncClient(
             timeout=self._settings.request_timeout,
