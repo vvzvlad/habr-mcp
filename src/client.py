@@ -229,17 +229,9 @@ async def _resolve_host_ips(
 async def _ssrf_guard(request: httpx.Request) -> None:
     """httpx *request* event hook: block SSRF before every (redirected) request.
 
-    Fires for the initial request AND for every redirect hop, so a 3xx pivot to
-    an internal host is rejected too. Raises ``HabrApiError`` (Russian) when the
-    target host resolves to any blocked address. Scheme is screened earlier in
-    ``fetch_resource``; redirect hops to a non-http(s) scheme are rejected by
-    httpx itself.
-
-    Residual risk: this resolve-then-connect design does NOT fully close
-    DNS-rebinding / TOCTOU. A malicious resolver can return a public IP to this
-    guard and a private IP to httpx's own connect-time resolution. Closing it
-    fully would require pinning the validated IP for the actual connection; that
-    is out of scope here and the residual risk is accepted.
+    Fires for every redirect hop too; raises ``HabrApiError`` (Russian) when the
+    host resolves to a blocked address. Accepted residual risk: resolve-then-
+    connect does not close DNS rebinding (the validated IP is not pinned).
     """
     host = request.url.host
     if not host:
@@ -600,11 +592,10 @@ class HabrClient:
         URL, an unsupported block atom) nothing is saved and ``HabrApiError``
         lists the losses.
 
-        Validates the fields Habr requires on create (hubs/tags/flow non-empty,
-        announce 100..3000 chars) locally and raises ``HabrApiError`` with a
-        clear Russian message before any network call, so the LLM gets actionable
-        feedback instead of a raw 422. The announce is a separate, required field
-        the caller writes — it is NEVER derived from the article body.
+        Required create fields (hubs/tags/flow non-empty, announce 100..3000
+        chars) are validated locally before any network call, so the LLM gets a
+        Russian message instead of a raw 422. The announce is never derived from
+        the body.
         """
         if not hubs:
             raise HabrApiError(
@@ -999,24 +990,11 @@ class HabrClient:
     ) -> tuple[bytes, str | None]:
         """Resolve a ``data:`` URI or ``http(s)`` URL to ``(bytes, content_type)``.
 
-        ``data:`` URIs are decoded locally (no network); the content type is the
-        declared media type (e.g. ``image/jpeg``) or None when absent. ``http(s)``
-        URLs are fetched with a plain GET — NO Authorization header is ever sent;
-        the content type is the response ``Content-Type`` (normalized to the part
-        before ``;``, stripped and lowercased) or None when absent. The habr
-        proxy/timeout/UA are reused (mirrors ``fetch_csrf_token``). Redirects are
-        followed (``follow_redirects=True``) so 3xx CDN/Google ``contentUri``
-        hops resolve — this leaks nothing since no credentials are ever sent.
-        When the ``ETag`` response header is a bare sha256 hex digest the body is
-        verified against it (this guards the gitmost sandbox blobs, which send
-        ``ETag: "<sha256hex>"``); any other / absent ETag is left unverified so
-        external images with opaque CDN validators keep working. Raises
-        ``HabrApiError`` (Russian message) on a malformed data URI, a transport
-        error, or a sha256 mismatch.
-
-        Pass ``client`` to reuse a shared ``httpx.AsyncClient`` (e.g. the bounded
-        pool in ``_reupload_images``); it is then NOT closed here. When omitted a
-        temporary client is created and closed before returning.
+        ``data:`` URIs are decoded locally; ``http(s)`` URLs get a plain GET with
+        NO credentials (so following redirects leaks nothing). A bare-sha256
+        ``ETag`` (gitmost sandbox blobs) is verified against the body; other ETags
+        are ignored. Raises ``HabrApiError`` (Russian) on a bad data URI, a
+        transport error or a sha256 mismatch. A passed ``client`` is not closed.
         """
         if uri.startswith("data:"):
             data, media = _decode_data_uri(uri)
@@ -1080,19 +1058,10 @@ class HabrClient:
     ) -> tuple[dict[str, str], list[str]]:
         """Fetch every image source and reupload it to habrastorage.
 
-        Returns ``(image_src_key -> habrastorage_url, warnings)``. Never raises:
-        a failed fetch/upload only leaves the src unmapped and adds a warning
-        (the reason). The converter records each unmapped image as a content loss
-        and the caller (``create_draft``/``update_draft``) decides whether to
-        refuse the save. Each ``attrs.src``
-        may be a plain http(s) URL string, a ``data:`` URI string, or an MCP
-        ``resource_link`` dict; all are resolved through ``fetch_resource`` with
-        NO credentials. Sandbox source links are ephemeral (~1h TTL).
-
-        Each image is fetched AND uploaded in a single pass under a concurrency
-        bound (``_IMAGE_FETCH_CONCURRENCY``) so at most that many image bodies are
-        ever held in memory at once and the open sockets/FDs stay bounded; one
-        shared ``httpx.AsyncClient`` reuses connections across all fetches.
+        Returns ``(image_src_key -> habrastorage_url, warnings)`` and never
+        raises: a failed image stays unmapped with a warning, and the caller
+        decides whether that loss refuses the save. Fetch and upload run in one
+        pass under ``_IMAGE_FETCH_CONCURRENCY`` to bound memory and sockets.
         """
         srcs = collect_image_srcs(docmost_doc)
         mapping: dict[str, str] = {}

@@ -387,7 +387,7 @@ async def test_create_draft_tool_reports_id(seeded_server, docmost_doc):
 
 @respx.mock
 async def test_create_draft_from_docmost_accepts_dict(seeded_server, docmost_doc):
-    # Regression: FastMCP pre-parses an object-shaped JSON string into a dict
+    # FastMCP pre-parses an object-shaped JSON string into a dict
     # before validation, so ``doc`` arrives as a dict (not a string) — the tool
     # must accept it instead of rejecting it at the schema layer.
     respx.post(f"{BASE_URL}publication/save").mock(
@@ -448,7 +448,7 @@ async def test_create_draft_from_gdoc_tool_reports_id(seeded_server):
 
 @respx.mock
 async def test_create_draft_from_gdoc_accepts_dict(seeded_server):
-    # Regression: FastMCP pre-parses an object-shaped JSON string into a dict
+    # FastMCP pre-parses an object-shaped JSON string into a dict
     # before validation, so ``doc`` arrives as a dict (not a string) — the tool
     # must accept it instead of rejecting it at the schema layer.
     respx.post(f"{BASE_URL}publication/save").mock(
@@ -521,7 +521,7 @@ async def test_update_draft_from_gdoc_tool_saves(seeded_server, post_data_payloa
 @respx.mock
 async def test_update_draft_from_docmost_tool_saves(seeded_server, post_data_payload,
                                                     docmost_doc):
-    # Regression: ``doc`` arrives as a dict (FastMCP pre-parses an object-shaped
+    # ``doc`` arrives as a dict (FastMCP pre-parses an object-shaped
     # JSON string before validation), so the optional ``doc`` must accept it.
     respx.get(f"{BASE_URL}publication/post-data/42").mock(
         return_value=httpx.Response(200, json=post_data_payload)
@@ -813,7 +813,7 @@ async def test_create_draft_from_docmost_json_string_not_fetched(seeded_server,
                                                                  docmost_doc):
     import json as json_module
 
-    # Regression: a doc passed as a JSON STRING stays inline — never fetched.
+    # A doc passed as a JSON STRING stays inline — never fetched.
     link_route = respx.get(_DOC_LINK_URI).mock(
         return_value=httpx.Response(200, content=b"{}")
     )

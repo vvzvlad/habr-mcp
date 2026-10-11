@@ -1392,7 +1392,7 @@ async def test_fetch_csrf_token_network_error_returns_none(anon_settings):
 
 @respx.mock
 async def test_fetch_csrf_token_hl_en_hits_en_feed(anon_settings):
-    # Regression: an `hl=en` cookie must probe the /en/ feed directly so no
+    # An `hl=en` cookie must probe the /en/ feed directly so no
     # language redirect strips the Cookie header and the csrf meta is found.
     en_route = respx.get("https://habr.com/en/feed/").mock(
         return_value=httpx.Response(

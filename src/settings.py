@@ -37,9 +37,8 @@ class Settings(BaseSettings):
     state_dir: str = Field(default="data", validation_alias="HABR_MCP_STATE_DIR")
     # Content/flow language (`fl`) and interface language (`hl`); Habr uses both.
     habr_lang: str = "ru"
-    # Per-user carrier fields. These are NO LONGER read from the global env for
-    # auth: the client registry builds a per-user Settings and fills them from
-    # the per-token credential store. They stay so HabrClient keeps its shape.
+    # Per-user carrier fields, filled by the client registry from the per-token
+    # credential store (never from the global env).
     # `connect.sid` cookie value from a logged-in browser session (write auth).
     habr_connect_sid: str | None = None
     # CSRF token: the value sent in the `csrf-token` request header (write auth).
