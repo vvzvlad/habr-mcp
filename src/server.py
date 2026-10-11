@@ -210,7 +210,7 @@ async def _resolve_doc_arg(
     canonical MCP ``resource_link``, any other dict carrying a ``uri`` (without
     ``type == "doc"``), or a bare ``http(s)``/``data:`` URL string. Its ``uri``
     is fetched over HTTP (or decoded from a ``data:`` URI) and the bytes are
-    parsed as JSON. Otherwise the inline value is parsed as today. Returns
+    parsed as JSON. Otherwise the inline value is parsed directly. Returns
     ``(parsed, error)`` where ``error`` is a Russian message on a fetch or
     decode failure. A plain inline JSON string is NEVER treated as a URL — a
     serialized ProseMirror doc starts with ``{``/``[``, so it stays inline.

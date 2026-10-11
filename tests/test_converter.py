@@ -83,7 +83,7 @@ def test_heading_level_clamp_high():
 
 
 def test_heading_top_h2_h3_normalize_to_one_and_two():
-    # Key regression: a body that starts at H2 must yield Habr level-1 headings.
+    # A body that starts at H2 must yield Habr level-1 headings.
     src = _doc(
         {"type": "heading", "attrs": {"level": 2}, "content": [_text("A")]},
         {"type": "heading", "attrs": {"level": 3}, "content": [_text("B")]},
@@ -671,7 +671,7 @@ def test_mention_nick_length_boundary():
 
 
 def test_plain_prose_without_at_has_no_spurious_mention():
-    # Regression: ordinary prose with no @ yields a single unchanged text node.
+    # Ordinary prose with no @ yields a single unchanged text node.
     src = _doc({"type": "paragraph", "content": [_text("just normal prose here")]})
     inline = docmost_to_habr_doc(src)["content"][0]["content"]
     assert inline == [{"type": "text", "text": "just normal prose here"}]
@@ -860,8 +860,7 @@ def test_image_none_map_recorded_as_loss():
 
 def test_unknown_block_atom_recorded_as_loss():
     # A genuinely-unknown childless atom hits the fallback drop branch and is a
-    # blocking loss. (drawio/excalidraw are NO LONGER unknown — they convert to
-    # images.)
+    # blocking loss.
     src = _doc({"type": "someUnknownAtom", "attrs": {"id": "1"}})
     warnings: list[str] = []
     losses: list = []
@@ -1677,7 +1676,7 @@ def test_footnote_ordered_list_start_offset():
 
 def test_footnote_adjacent_markers_merge_titles():
     # word[1][2]: both markers attach to the same word; titles are merged and no
-    # content is lost (regression: the 2nd marker used to be dropped silently).
+    # content is lost.
     src = _doc(
         {"type": "paragraph", "content": [_text("слово[1][2] дальше")]},
         *_notes_section("Примечания переводчика", "one", "two"),

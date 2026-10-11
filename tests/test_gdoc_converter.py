@@ -134,7 +134,7 @@ def test_title_dropped_subtitle_maps_to_level_2():
 
 
 def test_leading_title_not_duplicated_in_body():
-    # Regression: a leading TITLE (typically identical to the article title) must
+    # A leading TITLE (typically identical to the article title) must
     # not be emitted as an in-body heading and duplicate the Habr post title.
     blocks = _blocks(
         _para(_run("My Article\n"), style={"namedStyleType": "TITLE"}),
@@ -915,7 +915,7 @@ def test_coerce_px_non_numeric_and_missing_return_none():
     assert _coerce_px(None) is None
     assert _coerce_px("not a number") is None
     assert _coerce_px({}) is None
-    # A valid magnitude still converts (72 PT -> 96 px) to guard against regressions.
+    # A valid magnitude still converts (72 PT -> 96 px).
     assert _coerce_px(72) == 96
 
 

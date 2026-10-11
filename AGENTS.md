@@ -56,22 +56,12 @@ unsupported block atom (anything but the harmless `pageBreak`), no draft is
 created or updated and the tool returns a Russian error listing each lost node
 (type, src, count), the failure reasons and what to do.
 
-## Setup
-All routine actions go through the `Makefile` — run `make help` to list targets.
-```bash
-make install           # create .venv and install dev/test deps
-cp .env.example .env   # then fill in the values  (shortcut: make env)
-```
-
-## Running tests
-```bash
-make test              # runs .venv/bin/pytest
-```
-
-## Running the app
-```bash
-make run               # runs .venv/bin/python main.py
-```
+## Setup and tests
+All routine actions go through the `Makefile` — `make help` lists targets
+(`install`, `env`, `test`, `run`, `clean`); `make` creates a local `.venv` on first use.
+Tests run in CI: `.gitea/workflows/tests.yml` on PRs, and the `test` job in
+`.gitea/workflows/image-check-publish.yml` gates the image build on `main`. The suite
+needs no secrets (every `Settings` field has a default); httpx is mocked via respx.
 
 ## Conventions
 - All mutable state goes under `data/` (the per-token credential store).
@@ -81,11 +71,18 @@ make run               # runs .venv/bin/python main.py
   `habr_login` and are stored encrypted under `data/`.
 - Code comments are in English; MCP tool descriptions (`description=`) are in
   Russian (text for the LLM).
-- All repeated actions (env setup, tests, run) go through `make` targets.
-- Python always runs inside a local `.venv`, created automatically by `make` on
-  first use — never the system Python.
+- Python runs inside the local `.venv`, never the system Python.
 - Tests are required for new code; in CI `build` depends on `test`.
 - No `EXPOSE` in the Dockerfile — Traefik publishes the service via compose
   labels (MCP clients connect to `https://<host>/mcp`).
 - Write endpoints are reverse-engineered from Habr's internal API; URL/body/header
   logic is centralised in `src/client.py` — fix it there if Habr changes routes.
+
+## Limits for agents
+- Tests: at most three times the code (`wc -l` of `tests/` against the code). Over the limit,
+  still write the test you need, and in the same change go through the old tests: drop or merge
+  duplicates and tests of implementation rather than behaviour.
+- Comments explain the code as it is and why it is built this way. History ("used to", "after
+  the review", "since the incident") goes into the commit message.
+- This file stays under ~150 lines: only what an agent would get wrong without it. No decision
+  history, incident logs or retelling of the code.

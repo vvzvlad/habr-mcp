@@ -1,14 +1,6 @@
-"""Tests for the env-alias contract of the project ``Settings`` model.
-
-These guard the deploy/config surface: the aliased fields must read from their
-``HABR_MCP_*`` env aliases (with correct types), and that alias must take
-priority over a bare un-prefixed name. They are hermetic — built with
-``Settings(_env_file=None)`` so the repo ``.env`` cannot leak in, and any unset
-HABR_MCP_* var is removed first.
-
-A silent break here (e.g. ``HABR_MCP_PORT`` no longer being read) would quietly
-fall back to a default in production; that is exactly what these tests catch.
-"""
+"""Env-alias contract of ``Settings``: aliased fields read their ``HABR_MCP_*``
+env vars with correct types, and the alias beats a bare un-prefixed name.
+Hermetic: ``Settings(_env_file=None)`` and unset HABR_MCP_* vars are removed."""
 
 from src.settings import Settings
 
